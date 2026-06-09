@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ファイルシステム メディアブラウザ</title> <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="header-container"> <div class="header">
+            <div class="header-controls">
+                <select id="mode-selector" class="button"></select>
+                <input type="text" id="search-input" placeholder="キーワードを入力して検索...">
+                <button id="search-btn" class="button">検索</button>
+                <button id="stats-btn" class="button">統計</button>
+            </div>
+            <div class="header-right-controls">
+                <div class="maintenance-container" style="position: relative;">
+                    <button id="maintenance-btn" class="button">管理</button>
+                    <div id="maintenance-menu"> <button id="update-cache-btn" class="button">キャッシュ更新</button>
+                        <button id="clean-data-btn" class="button">無効記録の破棄</button>
+                        <button id="export-data-btn" class="button">構造エクスポート</button>
+                        <button id="edit-tags-btn" class="button">タグ編集</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="directory-header"> <div class="header-cover-wrapper"><img id="header-cover-img" src="" alt="Cover"></div>
+        <div class="header-info">
+            <div id="header-title" class="header-title"></div>
+            <div id="header-tags" class="header-tags"></div>
+        </div>
+    </div>
+    <div class="breadcrumb-bar" style="display: flex; align-items: center; background-color: var(--background-color); border-bottom: 1px solid var(--card-border-color);">
+        <div id="breadcrumb-container" class="breadcrumb-container" style="border-bottom: none; flex-grow: 1;"><span class="breadcrumb-item">ROOT</span></div>
+        <button id="open-local-folder-btn" class="button" style="margin-right: 20px; padding: 4px 8px; font-size: 16px;" title="ローカルエクスプローラーで現在のフォルダを開く">📂</button>
+    </div>
+    <div id="tag-filter-container" class="tag-filter-container"> <div id="tag-filter-scroll" class="tag-filter-scroll"></div>
+        <button id="tag-filter-expand-btn" class="button">v</button>
+    </div>
+    <div id="browse-view" class="main-content">
+        <div id="media-container" class="grid-view"></div> </div>
+    <div id="stats-view" class="main-content" style="display: none;">
+        <div class="stats-header"><h1>作品アクセス統計</h1></div>
+        <div id="stats-container"></div> </div>
+    <div id="loading-indicator">読み込み中...</div> <div id="audio-lyrics-container" class="audio-lyrics-overlay">
+        <div id="audio-lyrics-text" class="audio-lyrics-text"></div>
+    </div>
+    <div id="music-player-bar"> <div id="player-expanded-panel">
+            <canvas id="visualizer-canvas"></canvas> <div class="rating-container"> <div class="rating-row" style="--slider-color: #00ffcc;"> <span class="rating-label">新鮮度</span>
+                    <span class="rating-mark">-2</span><input type="range" id="rate-freshness" min="-2" max="2" step="1" value="0"><span class="rating-mark">+2</span>
+                </div>
+                <div class="rating-row" style="--slider-color: #ff66cc;"> <span class="rating-label">メロディ</span>
+                    <span class="rating-mark">-2</span><input type="range" id="rate-melody" min="-2" max="2" step="1" value="0"><span class="rating-mark">+2</span>
+                </div>
+                <div class="rating-row" style="--slider-color: #ffcc00;"> <span class="rating-label">感情</span>
+                    <span class="rating-mark">-2</span><input type="range" id="rate-emotion" min="-2" max="2" step="1" value="0"><span class="rating-mark">+2</span>
+                </div>
+                <button id="submit-rating-btn" class="button">感想を記録</button>
+            </div>
+        </div>
+        <div class="music-controls-row"> <button id="player-expand-btn" class="control-btn" title="詳細を展開/格納">🔼</button>
+            <button id="player-prev-btn" class="control-btn">⏮</button>
+            <button id="player-play-btn" class="control-btn">▶</button>
+            <button id="player-next-btn" class="control-btn">⏭</button>
+            <button id="player-shuffle-btn" class="control-btn" title="シャッフル再生">🔀</button>
+            <button id="player-loop-btn" class="control-btn" title="リピートモード">🔁</button>
+            <span id="player-track-info" style="color: #aaa; font-size: 12px; margin-left: 10px;"></span>
+            <button id="player-close-btn" class="control-btn" title="プレイヤーを閉じる" style="margin-left: auto; color: #ff6666; font-weight: bold;">✖</button>
+        </div>
+        <audio id="current-audio-player" controls controlsList="nodownload" crossorigin="anonymous"></audio>
+    </div>
+    <div id="image-viewer" class="overlay"> <span class="close-btn">&times;</span>
+        <div class="image-container"><img id="current-image" src="" alt="viewer image"></div>
+        <div id="progress-bar-container" class="progress-bar"></div>
+    </div>
+    <div id="text-viewer" class="overlay"> <span class="close-btn">&times;</span>
+        <div class="text-reader-container">
+            <div id="text-reader-header">Filename.txt</div>
+            <div id="text-reader-content"></div>
+            <div class="text-reader-controls">
+                <button id="text-prev-btn" class="button">前のページ (←)</button>
+                <span id="text-page-info">1 / 1</span>
+                <button id="text-next-btn" class="button">次のページ (→)</button>
+            </div>
+        </div>
+    </div>
+    <div id="video-player" class="overlay"> <span class="close-btn">&times;</span>
+        <video id="current-video" controls autoplay></video>
+        <div id="video-subtitle-container" class="video-subtitle-area"></div>
+    </div>
+    <div id="epub-viewer" class="overlay"> <span class="close-btn" style="position: absolute; top: 10px; right: 20px; color: #333;">&times;</span>
+        <div id="epub-area"></div>
+        <div style="position: absolute; bottom: 20px; display: flex; gap: 20px;">
+            <button id="prev-page-btn" class="button">前のページ</button>
+            <button id="next-page-btn" class="button">次のページ</button>
+        </div>
+    </div>
+    <template id="card-template"> <div class="card">
+            <div class="card-image-wrapper"><img loading="lazy"><span class="placeholder-text"></span></div>
+            <div class="card-info"><div class="card-filename"></div><div class="card-tags"></div></div>
+        </div>
+    </template>
+    <template id="file-row-template"> <div class="file-row"><span class="file-icon"></span><span class="file-name"></span><span class="file-meta"></span></div>
+    </template>
+    <div id="universal-subtitle" class="subtitle-overlay"></div>
+    <script type="module" src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.1.5/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/epubjs/dist/epub.min.js"></script>
+</body>
+</html>

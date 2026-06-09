@@ -1,0 +1,8 @@
+{
+  "name": "メディアブラウザ",
+  "short_name": "メデブラ",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#242424",
+  "theme_color": "#3B3B3B"
+}

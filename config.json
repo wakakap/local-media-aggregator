@@ -1,0 +1,27 @@
+{
+  "system_data_dir": "./data",
+  "base_dirs": [
+    "./data/DATA_1","./data/DATA_2"
+  ],
+  "modes": [
+    { "id": "MANGA", "name": "MANGA", "pages": "MANGA_PAGES", "cover": "MANGA_COVER" },
+    { "id": "VIDEO", "name": "VIDEO", "pages": "VIDEO_PAGES", "cover": "VIDEO_COVER" },
+    { "id": "GAME", "name": "GAME", "pages": "GAME_PAGES", "cover": "GAME_COVER" },
+    { "id": "MUSIC", "name": "MUSIC", "pages": "MUSIC_PAGES", "cover": "MUSIC_COVER" },
+    { "id": "NOVEL", "name": "NOVEL", "pages": "NOVEL_PAGES", "cover": "NOVEL_COVER" }
+  ],
+  "extensions": {
+    "image": [".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".bmp", ".ico"],
+    "text": [".txt"],
+    "audio": [".mp3", ".m4a", ".flac", ".wav", ".ogg", ".webm"],
+    "video": [".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv"],
+    "subtitle": [".srt", ".ass", ".vtt"],
+    "ebook": [".epub"],
+    "executable": [".iso", ".mdf", ".mds", ".exe", ".lnk", ".url"]
+  },
+  "exe_blacklist": [
+    "unins", "uninst", "setup", "startup", "config", "setting", "update", 
+    "boot", "launcher", "courier", "protect", "instal", "unity", "crash", 
+    "設定", "インストール", "マニュアル","削除", "チェック"
+  ]
+}

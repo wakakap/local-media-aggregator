@@ -159,9 +159,6 @@ def api_open_folder(): # ローカルフォルダを開く
 @app.route('/')
 def index(): return render_template('index.html')
 
-@app.route('/stats')
-def stats_page(): return render_template('stats.html')
-
 @app.route('/api/rate_music', methods=['POST'])
 def api_rate_music(): # 音楽の評価を保存
     data = request.get_json()

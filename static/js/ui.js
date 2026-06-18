@@ -268,31 +268,44 @@ function openEpubViewer(item) { // Epubビューア起動
 }
 export function epubNext() { if(epubRendition) epubRendition.next(); } // Epub次ページ
 export function epubPrev() { if(epubRendition) epubRendition.prev(); } // Epub前ページ
-function enableRename(card, item, nameEl) { // インラインリネームUI
-    const input = document.createElement('textarea'); input.value = item.name_no_ext; input.style.cssText = 'width: 100%; font-family: inherit; font-size: inherit; resize: none;';
+function enableRename(card, item, nameEl) { // インラインリネームUI (完全フロントエンド一時処理)
+    const input = document.createElement('textarea'); 
+    input.value = item.name_no_ext; 
+    input.style.cssText = 'width: 100%; font-family: inherit; font-size: inherit; resize: none;';
     nameEl.innerHTML = ''; nameEl.appendChild(input); input.focus(); input.select();
-    const save = async () => {
-        const newBase = input.value.trim(), icon = item.is_dir ? '📁' : (item.media_type === 'video' ? '🎬' : '📄'), oldCompositeKey = `${appState.mode}:${item.is_dir ? item.media_path : item.media_path.replace(/\.[^/.]+$/, "")}`;
+    const save = () => { // API呼び出しを削除し、フロントエンドの状態のみを更新
+        const newBase = input.value.trim(), icon = item.is_dir ? '📁' : (item.media_type === 'video' ? '🎬' : '📄');
         if (newBase && newBase !== item.name_no_ext) {
-            let newName = newBase; if (!item.is_dir && item.name.lastIndexOf('.') > 0) newName = newBase + item.name.substring(item.name.lastIndexOf('.'));
-            const res = await api.renameItem(appState.mode, item.full_path, newName);
-            if (res.status === 'success') {
-                if (res.new_item) Object.assign(item, res.new_item);
-                else {
-                    item.name = newName; item.name_no_ext = newBase;
-                    item.full_path = item.full_path.substring(0, item.full_path.lastIndexOf(item.full_path.includes('\\') ? '\\' : '/')) + (item.full_path.includes('\\') ? '\\' : '/') + newName;
-                    item.media_path = item.media_path.substring(0, item.media_path.lastIndexOf(item.media_path.includes('\\') ? '\\' : '/')) + (item.media_path.includes('\\') ? '\\' : '/') + newName;
-                }
-                card.dataset.path = item.full_path; nameEl.textContent = `${icon} ${item.name}`;
-                if (appState.isTagEditMode) {
-                    const newCompositeKey = `${appState.mode}:${item.is_dir ? item.media_path : item.media_path.replace(/\.[^/.]+$/, "")}`;
-                    appState.tempTagsData[newCompositeKey] = [...(appState.tempTagsData[oldCompositeKey] || item.tags || [])]; delete appState.tempTagsData[oldCompositeKey];
-                    renderTags(card.querySelector('.card-tags'), item);
-                }
-            } else { alert("名前の変更に失敗しました: " + res.message); nameEl.textContent = `${icon} ${item.name}`; }
+            let newName = newBase; 
+            if (!item.is_dir && item.name.lastIndexOf('.') > 0) newName = newBase + item.name.substring(item.name.lastIndexOf('.'));
+            const oldCompositeKey = `${appState.mode}:${item.is_dir ? item.media_path : item.media_path.replace(/\.[^/.]+$/, "")}`;
+            // 1. オリジナルパスの記録（連続リネームに対応するため）
+            if (!item.original_full_path) item.original_full_path = item.full_path;
+            // 2. 変更キューに登録
+            appState.pendingRenames[item.original_full_path] = newName;
+            // 3. 新しいパス文字列の計算
+            const parentPathFull = item.full_path.substring(0, Math.max(item.full_path.lastIndexOf('\\'), item.full_path.lastIndexOf('/')));
+            const sepFull = item.full_path.includes('\\') ? '\\' : '/';
+            const newFullPath = parentPathFull ? (parentPathFull + sepFull + newName) : newName;
+            let parentPathMedia = '';
+            const mediaLastSlash = Math.max(item.media_path.lastIndexOf('/'), item.media_path.lastIndexOf('\\'));
+            if (mediaLastSlash > -1) parentPathMedia = item.media_path.substring(0, mediaLastSlash);
+            const sepMedia = item.media_path.includes('\\') ? '\\' : '/';
+            const newMediaPath = parentPathMedia ? (parentPathMedia + sepMedia + newName) : newName;
+            // 4. タグデータの一時移行 (古いキーから新しいキーへ)
+            const newCompositeKey = `${appState.mode}:${item.is_dir ? newMediaPath : newMediaPath.replace(/\.[^/.]+$/, "")}`;
+            appState.tempTagsData[newCompositeKey] = [...(appState.tempTagsData[oldCompositeKey] || item.tags || [])]; 
+            if (oldCompositeKey !== newCompositeKey) delete appState.tempTagsData[oldCompositeKey];
+            // 5. アイテムオブジェクトの更新
+            item.name = newName; item.name_no_ext = newBase; 
+            item.full_path = newFullPath; item.media_path = newMediaPath;
+            // 6. UIの即時反映
+            card.dataset.path = item.full_path; nameEl.textContent = `${icon} ${item.name}`;
+            renderTags(card.querySelector('.card-tags'), item);
         } else nameEl.textContent = `${icon} ${item.name}`;
     };
-    input.onblur = save; input.onkeydown = (e) => { if(e.key === 'Enter') { e.preventDefault(); input.blur(); } };
+    input.onblur = save; 
+    input.onkeydown = (e) => { if(e.key === 'Enter') { e.preventDefault(); input.blur(); } };
 }
 export function renderTagFilter() { // タグフィルターUI構築
     const container = document.getElementById('tag-filter-scroll'); container.innerHTML = ''; const counts = {};
@@ -462,4 +475,151 @@ function renderVisualizer() { // ビジュアライザ描画ループ
 export function refreshAllTagsUI() { // 全カードとヘッダーのタグを更新
     if (appState.currentDataSet && appState.currentDataSet.metadata) { const headerTags = document.getElementById('header-tags'); if (headerTags.offsetParent !== null) renderTags(headerTags, appState.currentDataSet.metadata); }
     document.querySelectorAll('.card').forEach(card => { const tagsContainer = card.querySelector('.card-tags'), item = appState.currentDataSet.items.find(i => i.full_path === card.dataset.path); if (tagsContainer && item) renderTags(tagsContainer, item); });
+}
+// ドキドキモード制御用変数 (オーディオ同期、非同期デコード＆メモリキューによる究極のパフォーマンス最適化)
+const dkdViewer = document.getElementById('dokidoki-viewer'), dkdContainer = document.getElementById('dokidoki-container'), dkdSpotlight = document.getElementById('dokidoki-spotlight');
+const dkdStartBtn = document.getElementById('dkd-start-btn'), dkdBps = document.getElementById('dkd-bps'), dkdBeatsSwitch = document.getElementById('dkd-beats-switch');
+let dkdMasterTimer = null, dkdMediaTimeout = null, dkdMediaList = [], dkdIsPlaying = false, dkdBeatCount = 0;
+let dkdAngle = Math.random() * Math.PI, dkdDirection = 1, dkdHue = Math.random() * 360, dkdActiveLayer = 0;
+const dokiAudio = new Audio('/static/doki.wav');
+
+// 🌟 究極最適化：メモリキュー（事前デコード済みの要素をストックする）
+let dkdMediaQueue = []; 
+const MAX_PRELOAD = 4; // 常に4つのメディアをバックグラウンドで完全解析・待機させておく
+
+document.getElementById('dokidoki-btn').onclick = async () => { // 画面表示とリスト取得
+    dkdViewer.style.display = 'flex'; dkdContainer.innerHTML = ''; dkdSpotlight.style.display = 'none';
+    try {
+        dkdStartBtn.textContent = "読込中..."; dkdStartBtn.disabled = true;
+        const res = await fetch('/api/dokidoki_media'); const data = await res.json(); dkdMediaList = data.items;
+        dkdStartBtn.textContent = "START"; dkdStartBtn.disabled = false;
+        if(dkdMediaList.length === 0) { alert("メディアが見つかりません。"); dkdStartBtn.disabled = true; }
+    } catch(e) { console.error("ドキドキ取得エラー", e); dkdStartBtn.textContent = "エラー"; }
+};
+
+document.getElementById('dokidoki-close-btn').onclick = () => { dkdViewer.style.display = 'none'; stopDokidoki(); };
+dkdBps.oninput = (e) => { document.getElementById('dkd-bps-val').textContent = e.target.value; if(dkdIsPlaying) restartTimer(); };
+dkdBeatsSwitch.oninput = (e) => { document.getElementById('dkd-beats-switch-val').textContent = e.target.value; }; 
+
+dkdStartBtn.onclick = () => { // 再生トグルと初期化
+    if(dkdIsPlaying) stopDokidoki(); 
+    else { 
+        dkdIsPlaying = true; dkdSpotlight.style.display = 'block'; dkdBeatCount = 0; dkdActiveLayer = 0; dkdMediaQueue = [];
+        
+        // 双缓冲レイヤー初期化
+        dkdContainer.innerHTML = '<div id="dkd-layer-0" style="position:absolute;width:100%;height:100%;opacity:1;transition:opacity 0.1s ease;display:flex;justify-content:center;align-items:center;will-change:opacity;"></div>' +
+                                 '<div id="dkd-layer-1" style="position:absolute;width:100%;height:100%;opacity:0;transition:opacity 0.1s ease;display:flex;justify-content:center;align-items:center;will-change:opacity;"></div>';
+        
+        maintainPreloadQueue(); // 直ちにバックグラウンドでキューの補充・事前デコードを開始
+        
+        // 最初のデコード猶予を少し与えてから再生開始 (300ms)
+        setTimeout(() => {
+            if(!dkdIsPlaying) return;
+            loadFromQueueToLayer(0); loadFromQueueToLayer(1);
+            
+            const R = Math.max(window.innerWidth, window.innerHeight) * 1.5;
+            dkdSpotlight.style.transition = 'none'; dkdSpotlight.style.transform = `translate3d(${R * Math.cos(dkdAngle) * -1}px, ${R * Math.sin(dkdAngle) * -1}px, 0)`; 
+            
+            requestAnimationFrame(() => requestAnimationFrame(() => { restartTimer(); document.getElementById('dkd-layer-0').querySelector('video')?.play().catch(()=>{}); }));
+            dkdStartBtn.textContent = "STOP"; dkdStartBtn.style.background = "#f44336"; 
+        }, 300);
+    }
+};
+
+function maintainPreloadQueue() { // バックグラウンド非同期キュー補充（メインスレッドをブロックしない）
+    if (!dkdIsPlaying || dkdMediaList.length === 0) return;
+    while (dkdMediaQueue.length < MAX_PRELOAD) {
+        const item = dkdMediaList[Math.floor(Math.random() * dkdMediaList.length)];
+        const css = 'width: 100%; height: 100%; object-fit: contain; display: block; transform: translateZ(0);'; 
+        const src = `/api/dokidoki_file/${item.path.split('/').map(encodeURIComponent).join('/')}`;
+
+        if (item.type === 'image') {
+            const img = new Image(); img.src = src; img.style.cssText = css;
+            // 🌟 究極の最適化: decode() メソッドにより、画像のデコードを別スレッドで強制する（UIのフリーズを完全防止）
+            img.decode().catch(()=>{}); 
+            dkdMediaQueue.push(img);
+        } else {
+            const vid = document.createElement('video'); vid.src = src; vid.style.cssText = css; 
+            vid.muted = true; vid.loop = true; vid.playsInline = true; vid.preload = "auto"; // 動画も事前にバッファリング
+            vid.onloadedmetadata = () => { vid.currentTime = Math.random() * Math.max(0, vid.duration - 3); };
+            dkdMediaQueue.push(vid);
+        }
+    }
+}
+
+function loadFromQueueToLayer(layerIndex) { // デコード済みの要素をレイヤーに配置する（コストゼロ）
+    if (!dkdIsPlaying) return;
+    const layer = document.getElementById(`dkd-layer-${layerIndex}`); if (!layer) return;
+    layer.innerHTML = ''; 
+    if (dkdMediaQueue.length > 0) layer.appendChild(dkdMediaQueue.shift()); // キューの先頭から取得
+    maintainPreloadQueue(); // 消費したら即座に次を補充
+}
+
+function restartTimer() { clearInterval(dkdMasterTimer); dkdMasterTimer = setInterval(beatProcess, 1000 / parseInt(dkdBps.value)); }
+
+function stopDokidoki() { 
+    clearInterval(dkdMasterTimer); clearTimeout(dkdMediaTimeout); dkdIsPlaying = false; 
+    dkdContainer.innerHTML = ''; dkdSpotlight.style.display = 'none'; dkdMediaQueue = [];
+    dkdStartBtn.textContent = "START"; dkdStartBtn.style.background = "#2e7d32"; 
+} 
+
+function playTickSound() { const a = dokiAudio.cloneNode(); a.volume = 0.5; a.play().catch(()=>{}); }
+
+function beatProcess() { 
+    playTickSound(); dkdBeatCount++; 
+    if(dkdBeatCount >= parseInt(dkdBeatsSwitch.value)) { dkdBeatCount = 0; sweepSpotlightAndSwitch(); }
+}
+
+function sweepSpotlightAndSwitch() { 
+    const dur = 1.0 / parseInt(dkdBps.value); 
+    dkdAngle += (Math.random() - 0.5) * (10 * Math.PI / 180); dkdHue = (dkdHue + (Math.random() - 0.5) * 30 + 360) % 360;
+    const R = Math.max(window.innerWidth, window.innerHeight) * 1.5;
+    
+    dkdSpotlight.style.background = `radial-gradient(circle, hsla(${dkdHue}, 100%, 80%, 0.45) 0%, hsla(${dkdHue}, 100%, 65%, 0.15) 30%, transparent 65%)`;
+    dkdSpotlight.style.transition = `transform ${dur}s cubic-bezier(0.8, 0, 0.2, 1)`;
+    dkdSpotlight.style.transform = `translate3d(${R * Math.cos(dkdAngle) * dkdDirection}px, ${R * Math.sin(dkdAngle) * dkdDirection}px, 0)`; 
+    dkdDirection *= -1; 
+    
+    clearTimeout(dkdMediaTimeout);
+    dkdMediaTimeout = setTimeout(triggerMediaSwitch, dur * 500); 
+}
+
+function triggerMediaSwitch() { // オパシティ反転による極速切替と次弾装填
+    if(dkdMediaList.length === 0 || !dkdIsPlaying) return;
+    const currentLayer = document.getElementById(`dkd-layer-${dkdActiveLayer}`);
+    dkdActiveLayer = 1 - dkdActiveLayer; 
+    const nextLayer = document.getElementById(`dkd-layer-${dkdActiveLayer}`);
+    
+    if (currentLayer && nextLayer) {
+        currentLayer.style.opacity = '0'; currentLayer.querySelector('video')?.pause(); 
+        nextLayer.style.opacity = '1'; nextLayer.querySelector('video')?.play().catch(()=>{}); 
+        
+        // 完全に隠れた後に、事前解析済みのメモリキューから次の要素を引っ張ってくる
+        setTimeout(() => loadFromQueueToLayer(1 - dkdActiveLayer), 150); 
+    }
+}
+export function renderTelemetry() { // Telemetry Dashboard
+    const badgeEdit = document.getElementById('badge-edit-mode');
+    const badgeRebuild = document.getElementById('badge-rebuilding');
+    const badgeSource = document.getElementById('badge-source');
+    if (!badgeEdit || !badgeRebuild || !badgeSource) return;
+    // 1. 編集モードの表示/非表示
+    badgeEdit.style.display = appState.isTagEditMode ? 'block' : 'none';
+    // 2. キャッシュ構築中の表示/非表示
+    badgeRebuild.style.display = appState.isRebuilding ? 'block' : 'none';
+    // 3. データソースの切り替え
+    if (appState.currentSource) {
+        badgeSource.style.display = 'block';
+        if (appState.currentSource === 'cache') {
+            badgeSource.textContent = '⚡ Cache';
+            badgeSource.style.backgroundColor = '#4CAF50';
+            badgeSource.title = '超高速キャッシュメモリから読み込みました';
+        } else {
+            badgeSource.textContent = '💿 Disk';
+            badgeSource.style.backgroundColor = '#FF9800';
+            badgeSource.title = '物理ディスクを直接スキャンしました';
+        }
+    } else {
+        badgeSource.style.display = 'none';
+    }
 }

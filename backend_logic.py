@@ -194,8 +194,7 @@ def _create_item_data(full_path, root_path, cover_path, all_tags, cover_map, mod
 
     data = {
         "name": item_name, "name_no_ext": name_no_ext, "full_path": full_path,
-        "media_path": media_path, "is_dir": is_dir, "mode": mode, 
-        "tags": [] if is_savedata else all_tags.get(composite_key, [])
+        "media_path": media_path, "is_dir": is_dir, "mode": mode
     }
 
     if is_dir:
@@ -271,7 +270,7 @@ def get_directory_metadata(full_path, root_path, cover_path, all_tags, cover_map
             parent_dir = os.path.dirname(current_check_path)
             if parent_dir == current_check_path: break 
             current_check_path = parent_dir
-    return {"name": dir_name, "name_no_ext": dir_name, "media_path": rel_dir, "cover_filename": found_cover, "cover_source": cover_source, "tags": tags}
+    return {"name": dir_name, "name_no_ext": dir_name, "media_path": rel_dir, "cover_filename": found_cover, "cover_source": cover_source}
 
 def search_all(root_path, cover_path, all_tags, cover_map, keyword, mode): # 全体検索
     keyword_lower = keyword.lower()

@@ -13,11 +13,11 @@ document.addEventListener('DOMContentLoaded', async () => { // 初期化処理
     browsePath(new URLSearchParams(window.location.search).get('path') || ''); setupEventListeners();
 });
 async function browsePath(path, pushState = true) { // フォルダ閲覧処理
-    if (appState.isTagEditMode && path !== '' && path !== appState.currentPath) { if (!confirm("保存されていないタグの変更があります。移動すると変更が失われますが、よろしいですか？")) return; appState.isTagEditMode = false; appState.tempTagsData = {}; updateEditButtonUI(); }
+    if (appState.isTagEditMode && path !== '' && path !== appState.currentPath) { if (!confirm("保存されていないタグの変更があります。移動すると変更が失われますが、よろしいですか？")) return; appState.isTagEditMode = false; appState.tempTagsData = {}; appState.pendingRenames = {}; updateEditButtonUI(); }
     const currentRenderId = ++appState.renderingId; ui.showLoading(true); appState.inSearchMode = false; appState.selectedTags = []; appState.searchQuery = ''; ui.renderTagFilter();
     try {
         const data = await api.browse(appState.mode, path || ''); if (currentRenderId !== appState.renderingId) { console.log("期限切れの browse リクエストを無視します"); return; }
-        if (!data.error) { appState.currentPath = data.current_path; appState.isRoot = data.is_root; if (pushState) { const url = new URL(window.location); url.searchParams.set('mode', appState.mode); url.searchParams.set('path', path || ''); window.history.pushState({ path: path || '', mode: appState.mode }, '', url); } ui.renderContent(data); }
+        if (!data.error) { appState.currentPath = data.current_path; appState.isRoot = data.is_root; appState.currentSource = data.source; appState.isRebuilding = data.is_rebuilding; ui.renderTelemetry();if (pushState) { const url = new URL(window.location); url.searchParams.set('mode', appState.mode); url.searchParams.set('path', path || ''); window.history.pushState({ path: path || '', mode: appState.mode }, '', url); } ui.renderContent(data); }
         else alert("読み込み失敗: " + data.error);
     } catch (e) { console.error(e); } finally { if (currentRenderId === appState.renderingId) ui.showLoading(false); }
 }
@@ -28,7 +28,7 @@ function updateEditButtonUI() { // タグ編集UI更新
 }
 async function performSearch(query, type) { // 検索処理
     const currentRenderId = ++appState.renderingId; ui.showLoading(true); appState.inSearchMode = true; appState.searchQuery = Array.isArray(query) ? query.join('+') : query; appState.searchType = type;
-    try { const data = await api.search(appState.mode, query, type); if (currentRenderId !== appState.renderingId) { console.log("期限切れの search リクエストを無視します"); return; } ui.renderContent({ items: data.items, current_path: 'SEARCH', is_root: false }); }
+    try { const data = await api.search(appState.mode, query, type); if (currentRenderId !== appState.renderingId) { console.log("期限切れの search リクエストを無視します"); return; } appState.currentSource = data.source; appState.isRebuilding = data.is_rebuilding; ui.renderTelemetry(); ui.renderContent({ items: data.items, current_path: 'SEARCH', is_root: false }); }
     catch (e) { console.error(e); } finally { if (currentRenderId === appState.renderingId) ui.showLoading(false); }
 }
 function setupEventListeners() { // 全イベントリスナーの登録
@@ -44,7 +44,47 @@ function setupEventListeners() { // 全イベントリスナーの登録
     document.getElementById('search-input').onkeydown = (e) => { if (e.key === 'Enter') document.getElementById('search-btn').click(); };
     document.getElementById('stats-btn').onclick = () => { const browseView = document.getElementById('browse-view'), statsView = document.getElementById('stats-view'); if (statsView.style.display === 'none') { browseView.style.display = 'none'; statsView.style.display = 'block'; document.getElementById('tag-filter-container').style.display = 'none'; document.getElementById('directory-header').style.display = 'none'; ui.renderStatsView(); } else { statsView.style.display = 'none'; browseView.style.display = 'block'; (!appState.inSearchMode && !appState.isRoot) ? document.getElementById('directory-header').style.display = 'flex' : document.getElementById('tag-filter-container').style.display = 'block'; } };
     document.getElementById('maintenance-btn').onclick = () => { const menu = document.getElementById('maintenance-menu'); menu.style.display = menu.style.display === 'block' ? 'none' : 'block'; };
-    document.getElementById('edit-tags-btn').onclick = () => { if (!appState.isTagEditMode) { appState.isTagEditMode = true; appState.tempTagsData = JSON.parse(JSON.stringify(appState.tagsData)); updateEditButtonUI(); if (appState.currentDataSet) ui.refreshAllTagsUI(); } else { ui.showLoading(true); api.saveTags(appState.tempTagsData).then(() => { appState.tagsData = appState.tempTagsData; appState.isTagEditMode = false; updateEditButtonUI(); ui.refreshAllTagsUI(); ui.renderTagFilter(); alert("タグを保存しました！"); ui.showLoading(false); }); } };
+    document.getElementById('edit-tags-btn').onclick = async () => { 
+        if (!appState.isTagEditMode) { 
+            appState.isTagEditMode = true; 
+            appState.tempTagsData = JSON.parse(JSON.stringify(appState.tagsData)); 
+            appState.pendingRenames = appState.pendingRenames || {}; 
+            updateEditButtonUI(); 
+            ui.renderTelemetry();
+            if (appState.currentDataSet) ui.refreshAllTagsUI(); 
+        } else { 
+            ui.showLoading(true); 
+            try {
+                const res = await api.saveBatchEdits(appState.mode, appState.tempTagsData, appState.pendingRenames || {});
+                if (res.status === 'success') {
+                    appState.tagsData = appState.tempTagsData; 
+                    appState.isTagEditMode = false; 
+                    appState.pendingRenames = {}; 
+                    updateEditButtonUI(); 
+                    appState.isRebuilding = true;
+                    appState.currentSource = 'disk';
+                    ui.renderTelemetry();
+                    try {
+                        ui.refreshAllTagsUI(); 
+                        ui.renderTagFilter(); 
+                    } catch (renderErr) {
+                        console.error("UI更新エラー:", renderErr);
+                    }
+                    ui.showLoading(false);
+                    setTimeout(() => {
+                        alert("タグと名前の変更を保存しました！"); 
+                    }, 50);
+                } else {
+                    ui.showLoading(false);
+                    alert("保存失敗: " + (res.message || "バックエンドでエラーが発生しました"));
+                }
+            } catch (err) {
+                ui.showLoading(false);
+                alert("通信エラー: " + err.message);
+                console.error("Save Batch Error:", err);
+            }
+        } 
+    };
     document.getElementById('update-cache-btn').onclick = async () => { if (confirm(`${appState.mode} モードのキャッシュを更新しますか？変更をフルスキャンするため数秒かかる場合があります。`)) { ui.showLoading(true); const res = await api.updateCache(appState.mode); ui.showLoading(false); if (res.status === 'success') { alert("キャッシュを更新しました！🚀"); window.dispatchEvent(new CustomEvent('refresh-view')); } else alert("キャッシュ更新失敗: " + res.message); document.getElementById('maintenance-menu').style.display = 'none'; } };
     document.getElementById('export-data-btn').onclick = async () => { if (confirm("すべての作品ディレクトリ構造をTXTファイルにエクスポートしますか？")) { ui.showLoading(true); const res = await api.exportData(); ui.showLoading(false); if (res.status === 'success') alert(`エクスポート成功！\n保存先: ${res.file}`); else alert("エクスポート失敗: " + (res.message || "不明なエラー")); document.getElementById('maintenance-menu').style.display = 'none'; } };
     document.getElementById('clean-data-btn').onclick = async () => { if (confirm("無効なタグと統計データをクリーンアップしますか？\n全ドライブをスキャンし、削除された作品の残留データを削除します。")) { ui.showLoading(true); const res = await api.cleanData(); ui.showLoading(false); if (res.status === 'success') { alert(`クリーンアップ完了！🧹\n無効なタグデータ ${res.tags_removed} 件、統計データ ${res.stats_removed} 件を削除しました`); appState.tagsData = await api.getTags(); ui.renderTagFilter(); window.dispatchEvent(new CustomEvent('refresh-view')); } else alert("クリーンアップ失敗: " + (res.message || "不明なエラー")); document.getElementById('maintenance-menu').style.display = 'none'; } };

@@ -6,10 +6,13 @@ export const appState = {
     isRoot: true,        // ルートディレクトリかどうか
     tagsData: {},        // グローバルタグキャッシュ
     tempTagsData: {},    // 編集モード中の一時タグデータ
+    pendingRenames: {},  // 未保存のリネーム操作を一時保持する辞書
     isTagEditMode: false,// タグ編集モード状態
     selectedTags: [],    // 選択されたフィルタータグ
     searchQuery: '',     // 現在の検索キーワード
     inSearchMode: false, // 検索結果ビュー状態
+    currentSource: '',   // 現在のデータソース ('cache' または 'disk')
+    isRebuilding: false, // バックグラウンドでキャッシュ構築中かどうか
     renderingId: 0,      // 非同期レンダリングの競合防止ID
     activeImports: {}    // 実行中の自動インポートタスク
 };

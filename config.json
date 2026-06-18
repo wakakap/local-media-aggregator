@@ -23,5 +23,6 @@
     "unins", "uninst", "setup", "startup", "config", "setting", "update", 
     "boot", "launcher", "courier", "protect", "instal", "unity", "crash", 
     "設定", "インストール", "マニュアル","削除", "チェック"
-  ]
+  ],
+  "dokidoki_dirs": ["MANGA_PAGES/Cyberpunk City Vol.1"]
 }

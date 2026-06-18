@@ -15,3 +15,4 @@ export const rateMusic = (key, ratings) => fetchJson('/api/rate_music', { method
 export const updateCache = (mode) => fetchJson('/api/update_cache', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode}) }); // キャッシュ更新
 export const cleanData = () => fetchJson('/api/clean_data', { method: 'POST' }); // 不要データクリーンアップ
 export const getSettings = () => fetchJson('/api/settings'); // システム設定取得
+export const saveBatchEdits = (mode, tagsData, renames) => fetchJson('/api/batch_edit', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode, tags: tagsData, renames})}); // 一括編集の送信

@@ -113,7 +113,7 @@ def api_browse(): # フォルダ内容のブラウズ処理
 
 @app.route('/api/search')
 def api_search(): # 検索API
-    mode, query, search_type = request.args.get('mode', 'MUSIC'), request.args.get('q', ''), request.args.get('type', 'keyword')
+    mode, query, search_type = request.args.get('mode', 'MUSIC'), request.args.get('q', '').strip(), request.args.get('type', 'keyword')
     if not query: return jsonify({"items": []})
     cache, items = get_mode_cache(mode), []
     if cache and "FLAT_ITEMS" in cache: # キャッシュヒット

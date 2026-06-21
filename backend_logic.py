@@ -283,7 +283,7 @@ def search_all(root_path, cover_path, all_tags, cover_map, keyword, mode): # 全
                 found_paths.add(full_path)
                 continue
             rel_path = name
-            item_key = os.path.splitext(rel_path)[0] if not os.path.isdir(full_path) else rel_path
+            item_key = rel_path if os.path.isdir(full_path) else os.path.splitext(rel_path)[0]
             composite_key = f"{mode.upper()}:{item_key}"
             if any(keyword_lower in tag.lower() for tag in all_tags.get(composite_key, [])): found_paths.add(full_path)
     except Exception: pass
@@ -373,9 +373,12 @@ def rename_item_and_update_tags(mode, old_path, new_name, tags_path, root_path, 
         new_path = os.path.join(os.path.dirname(old_path), new_name)
         is_same_file_case_change = (os.path.normcase(old_path) == os.path.normcase(new_path))
         if not is_same_file_case_change and os.path.exists(new_path): return {"status": "error", "message": "File exists"}, 409
+        is_dir = os.path.isdir(old_path)
         os.rename(old_path, new_path)
-        old_rel = os.path.splitext(os.path.relpath(old_path, root_path).replace('\\', '/'))[0]
-        new_rel = os.path.splitext(os.path.relpath(new_path, root_path).replace('\\', '/'))[0]
+        old_rel_full = os.path.relpath(old_path, root_path).replace('\\', '/')
+        new_rel_full = os.path.relpath(new_path, root_path).replace('\\', '/')
+        old_rel = old_rel_full if is_dir else os.path.splitext(old_rel_full)[0]
+        new_rel = new_rel_full if is_dir else os.path.splitext(new_rel_full)[0]
         
         old_prefix = f"{mode.upper()}:{old_rel}"
         new_prefix = f"{mode.upper()}:{new_rel}"
@@ -570,7 +573,7 @@ def clean_orphaned_data(base_dirs, modes_config, tags_path, stats_path): # 無�
                         ext = os.path.splitext(item)[1].lower()
                         if ext not in VALID_EXTS: continue
                     rel_path = os.path.relpath(full_path, root_path).replace('\\', '/')
-                    item_key = os.path.splitext(rel_path)[0]
+                    item_key = rel_path if is_dir else os.path.splitext(rel_path)[0]
                     composite_key = f"{mode.upper()}:{item_key}"
                     valid_keys.add(composite_key)
 

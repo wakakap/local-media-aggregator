@@ -13,7 +13,6 @@ document.addEventListener('DOMContentLoaded', async () => { // 初期化処理
     browsePath(new URLSearchParams(window.location.search).get('path') || ''); setupEventListeners();
 });
 async function browsePath(path, pushState = true) { // フォルダ閲覧処理
-    if (appState.isTagEditMode && path !== '' && path !== appState.currentPath) { if (!confirm("保存されていないタグの変更があります。移動すると変更が失われますが、よろしいですか？")) return; appState.isTagEditMode = false; appState.tempTagsData = {}; appState.pendingRenames = {}; updateEditButtonUI(); }
     const currentRenderId = ++appState.renderingId; ui.showLoading(true); appState.inSearchMode = false; appState.selectedTags = []; appState.searchQuery = ''; ui.renderTagFilter();
     try {
         const data = await api.browse(appState.mode, path || ''); if (currentRenderId !== appState.renderingId) { console.log("期限切れの browse リクエストを無視します"); return; }

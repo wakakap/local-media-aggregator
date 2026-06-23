@@ -46,7 +46,7 @@ function getTagCounts() { // タグの出現回数集計
     _cachedTagCounts = counts; _lastTagsDataRef = appState.tagsData; _lastMode = appState.mode;
     return counts;
 }
-function renderDirectoryHeader(metadata) { // フォルダヘッダー描画
+export function renderDirectoryHeader(metadata) { // フォルダヘッダー描画
     if (metadata && (metadata.cover_filename || (metadata.tags && metadata.tags.length > 0) || appState.isTagEditMode)) {
         directoryHeader.style.display = 'flex'; headerTitle.textContent = metadata.name;
         if (metadata.cover_filename) { headerCoverImg.src = metadata.cover_source === 'local' ? `/api/media/${appState.mode}/pages/${safeEncodePath(metadata.cover_filename)}` : `/api/media/${appState.mode}/cover/${safeEncodePath(metadata.cover_filename)}`; headerCoverImg.parentElement.style.display = 'block'; }
@@ -473,7 +473,9 @@ function renderVisualizer() { // ビジュアライザ描画ループ
     animationId = requestAnimationFrame(renderVisualizer);
 }
 export function refreshAllTagsUI() { // 全カードとヘッダーのタグを更新
-    if (appState.currentDataSet && appState.currentDataSet.metadata) { const headerTags = document.getElementById('header-tags'); if (headerTags.offsetParent !== null) renderTags(headerTags, appState.currentDataSet.metadata); }
+    if (appState.currentDataSet && appState.currentDataSet.metadata && !appState.inSearchMode && !appState.isRoot) {
+        renderDirectoryHeader(appState.currentDataSet.metadata);
+    }
     document.querySelectorAll('.card').forEach(card => { const tagsContainer = card.querySelector('.card-tags'), item = appState.currentDataSet.items.find(i => i.full_path === card.dataset.path); if (tagsContainer && item) renderTags(tagsContainer, item); });
 }
 // ドキドキモード制御用変数 (オーディオ同期、非同期デコード＆メモリキューによる究極のパフォーマンス最適化)

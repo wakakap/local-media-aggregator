@@ -24,15 +24,35 @@ VALID_EXTS = IMAGE_EXTENSIONS | TEXT_EXTENSIONS | AUDIO_EXTENSIONS | VIDEO_EXTEN
 STATS_LOCK = threading.Lock()
 MUSIC_RATINGS_LOCK = threading.Lock()
 
-def load_stats(stats_file_path): # 統計データの読み込み
-    if not os.path.exists(stats_file_path): return {}
-    try:
-        with open(stats_file_path, 'r', encoding='utf-8') as f: return json.load(f)
-    except: return {}
+_stats_cache = {}       # メモリ上の統計キャッシュ
+_stats_dirty = False    # 未保存の変更フラグ
+_flush_timer = None     # 遅延書き込みタイマー
 
-def save_stats(stats_file_path, data): # 統計データの保存
+def load_stats(stats_file_path):
+    if not os.path.exists(stats_file_path):
+        print(f"[stats] ファイルが見つかりません: {stats_file_path}")
+        return {}
     try:
-        with open(stats_file_path, 'w', encoding='utf-8') as f: json.dump(data, f, indent=2, ensure_ascii=False)
+        with open(stats_file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            print(f"[stats] 読み込み成功: {len(data)} エントリ")
+            return data
+    except Exception as e:
+        print(f"[stats] 読み込みエラー: {e}")  # ← BOMや文字化けの場合ここに出る
+        return {}
+
+def save_stats(stats_file_path, data): # 統計データの保存（アトミック書き込み）
+    import tempfile
+    try:
+        dir_name = os.path.dirname(stats_file_path)
+        fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp_path, stats_file_path)
+        except:
+            if os.path.exists(tmp_path): os.remove(tmp_path)
+            raise
     except Exception as e: print(f"Save stats error: {e}")
 
 def get_first_image_in_directory(directory_path): # フォルダ内の最初の画像を取得
@@ -342,24 +362,33 @@ def get_structured_stats_data(stats_file_path, item_key_map, all_root_paths, lim
     if limit > 0: results = results[:limit]
     return results
 
-def update_view_count(stats_file_path, mode, item_key, identifier=None): # 閲覧回数の更新
+def update_view_count(stats_file_path, mode, item_key, identifier=None): # 閲覧回数の更新（遅延書き込み）
+    global _stats_dirty, _stats_cache, _flush_timer
     composite_key = f"{mode.upper()}:{item_key}"
     with STATS_LOCK:
-        stats = load_stats(stats_file_path) 
-        if composite_key not in stats: stats[composite_key] = {"total_views": 0, "last_accessed": 0, "pages": {}, "files": {}}
-        entry = stats[composite_key]
+        if not _stats_cache:
+            _stats_cache.update(load_stats(stats_file_path))
+        entry = _stats_cache.setdefault(composite_key, {"total_views": 0, "last_accessed": 0, "pages": {}, "files": {}})
         now = int(time.time())
-        last_accessed = entry.get("last_accessed", 0)
-        SESSION_TIMEOUT = 60 
-        if (now - last_accessed) > SESSION_TIMEOUT: entry["total_views"] += 1
+        if (now - entry.get("last_accessed", 0)) > 60: entry["total_views"] += 1
         entry["last_accessed"] = now
         if isinstance(identifier, int):
             page_key = str(identifier + 1)
             entry["pages"][page_key] = entry["pages"].get(page_key, 0) + 1
         elif isinstance(identifier, str):
             entry["files"][identifier] = entry["files"].get(identifier, 0) + 1
-        save_stats(stats_file_path, stats) 
+        _stats_dirty = True
+        if _flush_timer: _flush_timer.cancel()
+        _flush_timer = threading.Timer(10, _flush_stats, args=[stats_file_path])
+        _flush_timer.start()
     return {"status": "success"}
+
+def _flush_stats(stats_file_path): # 遅延書き込みの実行（変更があった場合のみ）
+    global _stats_dirty
+    with STATS_LOCK:
+        if not _stats_dirty: return
+        save_stats(stats_file_path, _stats_cache)
+        _stats_dirty = False
 
 def save_tags(tags_file_path, tags_data): # タグデータの保存
     try:
@@ -511,7 +540,7 @@ def get_structured_stats_from_cache(stats_file_path, data_dir, limit=20): # キ�
             for p, v in entry['pages'].items(): sub_nodes.append({"name": f"Page {p}", "views": v, "total": v, "isLeaf": True, "type": "page", "page_index": int(p) - 1})
         elif 'files' in entry and entry['files']:
             for f, v in entry['files'].items(): sub_nodes.append({"name": f, "views": v, "total": v, "isLeaf": True, "type": "file"})
-        if not sub_nodes: continue
+        if not sub_nodes and folder_views == 0: continue
         if '/' in item_name:
             parts = item_name.split('/')
             parent_name, child_name = parts[0], parts[-1]
@@ -558,6 +587,15 @@ def export_tree_structure_from_cache(modes_config, data_dir): # キャッシュ�
     except Exception as e: return {"status": "error", "message": str(e)}
 
 def clean_orphaned_data(base_dirs, modes_config, tags_path, stats_path): # 無効なデータのクリーンアップ
+    unreachable = []
+    for base_dir in base_dirs:
+        if not os.path.exists(base_dir):
+            unreachable.append(base_dir)
+    if unreachable:
+        return {
+            "status": "error",
+            "message": f"以下のドライブが接続されていないため中止しました: {unreachable}"
+        }
     valid_keys = set()
     for mode, config in modes_config.items():
         folder_name = config['pages']

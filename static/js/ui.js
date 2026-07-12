@@ -82,6 +82,9 @@ function renderCard(item, targetElement = mediaContainer) { // グリッドカ�
     renderTags(tagsEl, item);
     clone.querySelector('.card-image-wrapper').onclick = (e) => { e.stopPropagation(); handleItemClick(item); };
     card.ondblclick = () => { if (appState.isTagEditMode) enableRename(card, item, nameEl); };
+    const delBtn = document.createElement('span'); delBtn.className = 'card-delete-btn'; delBtn.textContent = '×'; delBtn.title = '削除'; // 編集モード時のみCSSで表示
+    delBtn.onclick = (e) => { e.stopPropagation(); handleDeleteItem(item, card); };
+    card.appendChild(delBtn);
     targetElement.appendChild(clone);
 }
 function renderFileRow(item, targetElement = mediaContainer) { // リスト行の描画
@@ -90,6 +93,9 @@ function renderFileRow(item, targetElement = mediaContainer) { // リスト行�
     name.textContent = item.name;
     if (item.media_type === 'audio' && playerState.currentTrack && playerState.currentTrack.full_path === item.full_path) row.classList.add('playing');
     row.onclick = () => handleItemClick(item);
+    const delBtn = document.createElement('span'); delBtn.className = 'row-delete-btn'; delBtn.textContent = '×'; delBtn.title = '削除'; // 編集モード時のみCSSで表示
+    delBtn.onclick = (e) => { e.stopPropagation(); handleDeleteItem(item, row); };
+    row.appendChild(delBtn);
     targetElement.appendChild(clone);
 }
 export function renderTags(container, item) { // タグの描画
@@ -306,6 +312,49 @@ function enableRename(card, item, nameEl) { // インラインリネームUI (�
     };
     input.onblur = save; 
     input.onkeydown = (e) => { if(e.key === 'Enter') { e.preventDefault(); input.blur(); } };
+}
+function showConfirmDialog(message, swapButtons) { // カスタム確認ダイアログ (2回目はボタン位置を左右入替して誤操作防止)
+    return new Promise(resolve => {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:5000; display:flex; justify-content:center; align-items:center;';
+        const box = document.createElement('div');
+        box.style.cssText = 'background:#2a2a2a; border:1px solid #555; border-radius:8px; padding:20px 25px; max-width:420px; color:#fff; box-shadow:0 4px 20px rgba(0,0,0,0.8);';
+        const msg = document.createElement('div'); msg.style.cssText = 'margin-bottom:18px; font-size:14px; line-height:1.6; white-space:pre-wrap; word-break:break-all;'; msg.textContent = message;
+        const btnRow = document.createElement('div'); btnRow.style.cssText = 'display:flex; gap:12px; justify-content:flex-end;';
+        const okBtn = document.createElement('button'); okBtn.className = 'button'; okBtn.textContent = '削除する'; okBtn.style.cssText = 'background-color:#c62828; border:none;';
+        const cancelBtn = document.createElement('button'); cancelBtn.className = 'button'; cancelBtn.textContent = 'キャンセル';
+        const close = (v) => { overlay.remove(); resolve(v); };
+        okBtn.onclick = () => close(true); cancelBtn.onclick = () => close(false);
+        overlay.onclick = (e) => { if (e.target === overlay) close(false); }; // 枠外クリックはキャンセル扱い
+        swapButtons ? btnRow.append(okBtn, cancelBtn) : btnRow.append(cancelBtn, okBtn);
+        box.append(msg, btnRow); overlay.appendChild(box); document.body.appendChild(overlay);
+    });
+}
+export function notifyRcloneResult(r) { // クラウド同期結果の通知
+    if (!r || r.status === 'disabled') return;
+    if (r.status === 'not_backed_up') alert('ℹ️ クラウドに元のパスが存在しません。\nまだバックアップされていない項目のため、クラウド側の操作はスキップしました。');
+    else if (r.status === 'skipped') console.log('➖ rclone 同期対象外:', r.message);
+    else if (r.status === 'error') alert('⚠️ クラウド同期に失敗しました: ' + (r.message || '不明なエラー') + '\nローカル操作は完了済みです。次回のバックアップ/差分チェックで整合してください。');
+    else if (r.status === 'check_failed') alert('⚠️ クラウド側の存在確認に失敗しました: ' + (r.message || '') + '\n安全のためクラウド操作は行っていません。rclone の認証状態を確認してください。');
+    else console.log('☁️ クラウド同期完了:', r);
+}
+async function handleDeleteItem(item, elem) { // 削除処理 (二重確認 → ローカル削除 → クラウド同期)
+    const kind = item.is_dir ? 'フォルダ' : 'ファイル';
+    if (!await showConfirmDialog(`${kind}「${item.name}」を削除しますか？\n※ローカルディスクから削除されます`, false)) return;
+    if (!await showConfirmDialog(`⚠️ 最終確認：本当に削除してよろしいですか？`, true)) return; // 2回目はボタン位置入替
+    const targetPath = item.original_full_path || item.full_path; // 未保存リネームがある場合、ディスク上はまだ旧名のため元パスで削除
+    if (appState.pendingRenames) delete appState.pendingRenames[targetPath]; // 削除するものの未保存リネームは破棄
+    showLoading(true);
+    const res = await api.deleteItem(appState.mode, targetPath);
+    showLoading(false);
+    if (res.status === 'success') {
+        elem.remove(); // DOMから即時除去
+        if (appState.currentDataSet && appState.currentDataSet.items) appState.currentDataSet.items = appState.currentDataSet.items.filter(i => i !== item); // 状態からも除去
+        viewerState.fileList = viewerState.fileList.filter(i => i !== item); // ビューアのインデックスずれ防止
+        const compositeKey = `${appState.mode}:${item.is_dir ? item.media_path : item.media_path.replace(/\.[^/.]+$/, "")}`;
+        if (appState.tempTagsData) delete appState.tempTagsData[compositeKey];
+        notifyRcloneResult(res.rclone);
+    } else alert('削除失敗: ' + (res.message || res.error || '不明なエラー'));
 }
 export function renderTagFilter() { // タグフィルターUI構築
     const container = document.getElementById('tag-filter-scroll'); container.innerHTML = ''; const counts = {};
@@ -601,6 +650,7 @@ function triggerMediaSwitch() { // オパシティ反転による極速切替と
     }
 }
 export function renderTelemetry() { // Telemetry Dashboard
+    document.body.classList.toggle('tag-edit-mode', appState.isTagEditMode); // 編集モード用のグローバルクラス切替
     const badgeEdit = document.getElementById('badge-edit-mode');
     const badgeRebuild = document.getElementById('badge-rebuilding');
     const badgeSource = document.getElementById('badge-source');

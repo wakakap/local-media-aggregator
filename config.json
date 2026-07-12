@@ -24,5 +24,19 @@
     "boot", "launcher", "courier", "protect", "instal", "unity", "crash", 
     "設定", "インストール", "マニュアル","削除", "チェック"
   ],
-  "dokidoki_dirs": ["MANGA_PAGES/Cyberpunk City Vol.1"]
+  "dokidoki_dirs": ["MANGA_PAGES/Cyberpunk City Vol.1"],
+  "rclone": {
+    "enabled": true,
+    "remote_name": "googledrive_secure:BROWSER/",
+    "config_password": "你的rclone配置密码",
+    "upload_list": [
+        "MANGA_PAGES",
+        "MANGA_COVER"
+    ],
+    "exclude_list": ["*/THUMBNAILS/**"],
+    "exclude_keywords": ["THUMBNAILS"],
+    "rclone_exe": "rclone",
+    "timeout_seconds": 300
+},
+"use_recycle_bin": true
 }

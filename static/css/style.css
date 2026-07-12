@@ -120,3 +120,8 @@ input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
 .stat-bar-text { position: absolute; right: 5px; top: 0; line-height: 16px; font-size: 11px; color: rgba(255, 255, 255, 0.9); text-shadow: 0 0 2px black; }
 .compact-histogram { height: 40px !important; background-color: #1a1a1a !important; margin-top: 2px !important; padding: 0 5px 2px 140px !important; border-radius: 3px !important; display: none; align-items: flex-end; gap: 1px; box-sizing: border-box; } /* --- マイクロヒストグラム --- / 高さを圧縮 / テキスト領域を避ける余白 */
 .histogram-bar { opacity: 0.8; cursor: pointer; min-width: 2px; border-radius: 1px 1px 0 0; transition: background-color 0.1s, opacity 0.1s; }
+.card-delete-btn { display: none; position: absolute; top: 4px; right: 4px; z-index: 3; width: 18px; height: 18px; line-height: 17px; text-align: center; font-size: 13px; color: #fff; background-color: rgba(198, 40, 40, 0.9); border-radius: 50%; cursor: pointer; user-select: none; } /* カード右上の削除ボタン (編集モード時のみ表示) */
+.card-delete-btn:hover { background-color: #ff1744; transform: scale(1.15); }
+.row-delete-btn { display: none; margin-left: 10px; width: 18px; height: 18px; line-height: 17px; text-align: center; font-size: 13px; color: #fff; background-color: rgba(198, 40, 40, 0.9); border-radius: 50%; cursor: pointer; flex-shrink: 0; user-select: none; } /* リスト行右側の削除ボタン */
+.row-delete-btn:hover { background-color: #ff1744; }
+body.tag-edit-mode .card-delete-btn, body.tag-edit-mode .row-delete-btn { display: block; }

@@ -16,3 +16,4 @@ export const updateCache = (mode) => fetchJson('/api/update_cache', { method: 'P
 export const cleanData = () => fetchJson('/api/clean_data', { method: 'POST' }); // 不要データクリーンアップ
 export const getSettings = () => fetchJson('/api/settings'); // システム設定取得
 export const saveBatchEdits = (mode, tagsData, renames) => fetchJson('/api/batch_edit', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode, tags: tagsData, renames})}); // 一括編集の送信
+export const deleteItem = (mode, fullPath) => fetchJson('/api/delete_item', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode, full_path: fullPath})}); // アイテム物理削除 (ローカル + クラウド同期)

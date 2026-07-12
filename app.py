@@ -2,6 +2,7 @@ import os, sys, subprocess, threading, json
 from flask import Flask, jsonify, render_template, request, send_from_directory, abort
 from flask_cors import CORS
 import backend_logic as logic
+import rclone_sync as rsync
 import threading
 CACHE_BUILD_LOCKS = {}
 
@@ -16,6 +17,8 @@ BASE_DIRS = SYSTEM_CONFIG.get("base_dirs", [])
 DATA_DIR = SYSTEM_CONFIG.get("system_data_dir", "./data")
 TAGS_FILE_PATH, MAP_FILE_PATH = os.path.join(DATA_DIR, "tags.json"), os.path.join(DATA_DIR, "map.txt")
 STATS_FILE_PATH, MUSIC_RATINGS_PATH = os.path.join(DATA_DIR, "stats.json"), os.path.join(DATA_DIR, "music_ratings.json")
+RCLONE_CONFIG = SYSTEM_CONFIG.get("rclone", {"enabled": False}) # rclone クラウド同期設定
+USE_RECYCLE_BIN = SYSTEM_CONFIG.get("use_recycle_bin", True)# 削除時にゴミ箱へ移動するか
 
 
 MODES_CONFIG = {mode["id"].upper(): {'pages': mode["pages"], 'cover': mode["cover"]} for mode in SYSTEM_CONFIG.get("modes", [])}
@@ -179,25 +182,23 @@ def api_batch_edit(): # 一括編集（タグ保存とリネームのトラン�
         
         with TAGS_LOCK:
             # 1. 物理ファイルの一括リネーム処理
+            executed_renames, rename_failures = [], [] # rclone 同期用に成功分を記録
             for old_path, new_name in renames.items():
-                if not os.path.exists(old_path): continue
+                if not os.path.exists(old_path):
+                    rename_failures.append({"path": old_path, "reason": "not_found"}); continue
                 new_path = os.path.join(os.path.dirname(old_path), new_name)
                 is_same_file_case_change = (os.path.normcase(old_path) == os.path.normcase(new_path))
-                if not is_same_file_case_change and os.path.exists(new_path): continue
-                try: os.rename(old_path, new_path)
-                except: pass
+                if not is_same_file_case_change and os.path.exists(new_path):
+                    rename_failures.append({"path": old_path, "reason": "target_exists"}); continue
+                try:
+                    os.rename(old_path, new_path)
+                    executed_renames.append((old_path, new_path))
+                except Exception as e:
+                    rename_failures.append({"path": old_path, "reason": str(e)})
                 
             # 2. タグの保存処理
             logic.save_tags(TAGS_FILE_PATH, new_tags)
             all_tags = logic.load_tags(TAGS_FILE_PATH)
-            
-            # 3. 古いキャッシュの即時破棄
-            if mode in GLOBAL_JSON_CACHE:
-                del GLOBAL_JSON_CACHE[mode]
-            cache_file = os.path.join(DATA_DIR, f"{mode}_cache.json")
-            if os.path.exists(cache_file):
-                try: os.remove(cache_file)
-                except: pass
                 
             # 4. バックグラウンドでキャッシュ再構築
             if mode not in CACHE_BUILD_LOCKS:
@@ -208,7 +209,16 @@ def api_batch_edit(): # 一括編集（タグ保存とリネームのトラン�
 
             threading.Thread(target=locked_build).start()
             
-        return jsonify({"status": "success"})
+        # 5. クラウド同期 (ロック外で実行。失敗しても保存自体は成功として扱う)
+        rclone_report = []
+        for old_p, new_p in executed_renames:
+            try:
+                r = rsync.sync_rename(old_p, new_p, BASE_DIRS, RCLONE_CONFIG)
+            except Exception as e:
+                r = {"status": "error", "message": str(e)}
+            if r.get("status") != "disabled": rclone_report.append({"name": os.path.basename(new_p), **r})
+        return jsonify({"status": "success", "rclone_report": rclone_report, "rename_failures": rename_failures})
+    
     except Exception as e:
         import traceback
         print(f"Batch Edit Error: {traceback.format_exc()}")
@@ -230,6 +240,38 @@ def api_rename(): # アイテム名の変更処理
                 del GLOBAL_JSON_CACHE[data['mode']]
                 
     return jsonify(res), code
+
+@app.route('/api/delete_item', methods=['POST'])
+def api_delete_item(): # アイテムの物理削除 (ローカル削除 + タグ掃除 + クラウド同期)
+    data = request.get_json()
+    mode, full_path = data['mode'], data['full_path']
+    root_paths, cover_paths = get_paths_for_mode(mode)
+    if not is_safe_path(root_paths, full_path): return jsonify({"status": "error", "message": "Access Denied"}), 403
+    active_idx = get_active_index(root_paths, full_path)
+    if active_idx == -1 or not os.path.exists(full_path): return jsonify({"status": "error", "message": "Path not found"}), 404
+    is_dir = os.path.isdir(full_path) # 削除前に種別を確定 (削除後は判定不能になるため)
+    global all_tags
+    with TAGS_LOCK:
+        res = logic.delete_item_and_clean_tags(mode, full_path, TAGS_FILE_PATH, root_paths[active_idx], USE_RECYCLE_BIN)
+        if res['status'] != 'success': return jsonify(res), 500
+        all_tags = logic.load_tags(TAGS_FILE_PATH)
+        # 【重要】キャッシュファイルはここでは削除しない。
+        # 旧キャッシュで応答を継続し、再構築完了時に build_and_save_cache が
+        # ファイルを丸ごと上書きする (mtime 変化で GLOBAL_JSON_CACHE も自動更新)。
+        # 途中でプロセスが再起動しても「キャッシュ喪失→永久Diskモード」に陥らない。
+        if mode not in CACHE_BUILD_LOCKS: CACHE_BUILD_LOCKS[mode] = threading.Lock()
+        def locked_build(): # バックグラウンドでキャッシュ再構築
+            with CACHE_BUILD_LOCKS[mode]:
+                try: logic.build_and_save_cache(mode, root_paths, cover_paths, dict(all_tags), cover_map, DATA_DIR)
+                except Exception: # スレッド内の例外は握りつぶさずログに残す
+                    import traceback; print(f"Cache rebuild error ({mode}): {traceback.format_exc()}")
+        threading.Thread(target=locked_build).start()
+    try:
+        rclone_result = rsync.sync_delete(full_path, is_dir, BASE_DIRS, RCLONE_CONFIG) # ロック外でクラウド同期
+    except Exception as e: # ローカル削除は完了済みのため、同期失敗で 500 を返さない (二重の保険)
+        import traceback; print(f"Rclone sync error: {traceback.format_exc()}")
+        rclone_result = {"status": "error", "message": str(e)}
+    return jsonify({"status": "success", "rclone": rclone_result})
 
 @app.route('/api/open_folder')
 def api_open_folder(): # ローカルフォルダを開く
@@ -285,4 +327,4 @@ def api_dokidoki_file(filepath): # ドキドキモード専用のファイルス
         if os.path.exists(target): return send_from_directory(os.path.dirname(target), os.path.basename(target))
     abort(404)
 
-if __name__ == '__main__': app.run(host='0.0.0.0', port=5000, debug=True)
+if __name__ == '__main__': app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=True)

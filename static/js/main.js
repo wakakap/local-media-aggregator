@@ -71,7 +71,17 @@ function setupEventListeners() { // 全イベントリスナーの登録
                     }
                     ui.showLoading(false);
                     setTimeout(() => {
-                        alert("タグと名前の変更を保存しました！"); 
+                        alert("タグと名前の変更を保存しました！");
+                        if (res.rename_failures && res.rename_failures.length) alert("⚠️ 以下のリネームは実行できませんでした:\n" + res.rename_failures.map(f => `${f.path} (${f.reason})`).join('\n')); // 静かに握りつぶさず通知
+                        if (res.rclone_report && res.rclone_report.length) { // クラウド同期結果のサマリ
+                            const lines = res.rclone_report.map(r => {
+                                if (r.status === 'moved') return `☁️ 同期済: ${r.name}`;
+                                if (r.status === 'not_backed_up') return `ℹ️ 未バックアップのためスキップ: ${r.name}`;
+                                if (r.status === 'skipped') return `➖ 同期対象外: ${r.name}`;
+                                return `⚠️ 同期失敗: ${r.name} (${r.message || ''})`;
+                            });
+                            alert("クラウド同期結果:\n" + lines.join('\n'));
+                        }
                     }, 50);
                 } else {
                     ui.showLoading(false);

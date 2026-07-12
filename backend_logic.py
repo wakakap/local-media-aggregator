@@ -432,6 +432,27 @@ def rename_item_and_update_tags(mode, old_path, new_name, tags_path, root_path, 
         return {"status": "success", "new_item": new_item}, 200
     except Exception as e: return {"status": "error", "message": str(e)}, 500
 
+def delete_item_and_clean_tags(mode, target_path, tags_path, root_path, use_recycle_bin=True): # アイテム削除とタグデータの掃除
+    try:
+        is_dir = os.path.isdir(target_path)
+        deleted_via = "permanent"
+        if use_recycle_bin: # 可能ならゴミ箱へ移動 (誤削除からの復元を可能にする)
+            try:
+                from send2trash import send2trash
+                send2trash(target_path); deleted_via = "recycle_bin"
+            except ImportError:
+                shutil.rmtree(target_path) if is_dir else os.remove(target_path)
+        else:
+            shutil.rmtree(target_path) if is_dir else os.remove(target_path)
+        rel_full = os.path.relpath(target_path, root_path).replace('\\', '/')
+        rel = rel_full if is_dir else os.path.splitext(rel_full)[0]
+        prefix = f"{mode.upper()}:{rel}"
+        tags = load_tags(tags_path) # 削除対象とその配下のタグキーをすべて除去
+        updated = {k: v for k, v in tags.items() if not (k == prefix or k.startswith(prefix + "/"))}
+        if len(updated) != len(tags): save_tags(tags_path, updated)
+        return {"status": "success", "is_dir": is_dir, "deleted_via": deleted_via}
+    except Exception as e: return {"status": "error", "message": str(e)}
+
 def export_tree_structure(base_dirs, modes_config, data_dir): # ツリー構造のエクスポート
     output_filename = "library_structure.txt"
     output_path = os.path.join(data_dir, output_filename)

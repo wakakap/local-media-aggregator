@@ -538,6 +538,29 @@ def build_and_save_cache(mode, root_paths, cover_paths, all_tags, cover_map, dat
         return {"status": "success"}
     except Exception as e: return {"status": "error", "message": str(e)}
 
+def remove_item_from_cache(mode, target_path, data_dir): # キャッシュから削除項目を外科的に除去 (全再構築せず即時整合)
+    cache_file = os.path.join(data_dir, f"{mode}_cache.json")
+    if not os.path.exists(cache_file): return {"status": "no_cache"} # キャッシュ未構築なら何もしない (Diskモードは実状を直接反映するため)
+    try:
+        with open(cache_file, 'r', encoding='utf-8') as f: cache_data = json.load(f)
+        target_norm = os.path.normpath(target_path)
+        prefix = target_norm + os.sep
+        def keep(it): # 削除対象自身とその配下以外を残す
+            p = os.path.normpath(it.get("full_path", ""))
+            return p != target_norm and not p.startswith(prefix)
+        cache_data["ROOT"] = [it for it in cache_data.get("ROOT", []) if keep(it)]
+        cache_data["FLAT_ITEMS"] = [it for it in cache_data.get("FLAT_ITEMS", []) if keep(it)]
+        new_paths = {}
+        for k, v in cache_data.get("PATHS", {}).items():
+            k_norm = os.path.normpath(k)
+            if k_norm == target_norm or k_norm.startswith(prefix): continue # 削除フォルダ配下のノードごと除去
+            v["items"] = [it for it in v.get("items", []) if keep(it)]
+            new_paths[k] = v
+        cache_data["PATHS"] = new_paths
+        with open(cache_file, 'w', encoding='utf-8') as f: json.dump(cache_data, f, ensure_ascii=False, indent=2) # mtime 更新によりメモリキャッシュも次回リクエストで自動更新される
+        return {"status": "success"}
+    except Exception as e: return {"status": "error", "message": str(e)}
+
 def get_structured_stats_from_cache(stats_file_path, data_dir, limit=20): # キャッシュからの構造化統計取得
     stats = load_stats(stats_file_path)
     results = []

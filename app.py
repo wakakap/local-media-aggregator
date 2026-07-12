@@ -255,17 +255,11 @@ def api_delete_item(): # アイテムの物理削除 (ローカル削除 + タ�
         res = logic.delete_item_and_clean_tags(mode, full_path, TAGS_FILE_PATH, root_paths[active_idx], USE_RECYCLE_BIN)
         if res['status'] != 'success': return jsonify(res), 500
         all_tags = logic.load_tags(TAGS_FILE_PATH)
-        # 【重要】キャッシュファイルはここでは削除しない。
-        # 旧キャッシュで応答を継続し、再構築完了時に build_and_save_cache が
-        # ファイルを丸ごと上書きする (mtime 変化で GLOBAL_JSON_CACHE も自動更新)。
-        # 途中でプロセスが再起動しても「キャッシュ喪失→永久Diskモード」に陥らない。
-        if mode not in CACHE_BUILD_LOCKS: CACHE_BUILD_LOCKS[mode] = threading.Lock()
-        def locked_build(): # バックグラウンドでキャッシュ再構築
-            with CACHE_BUILD_LOCKS[mode]:
-                try: logic.build_and_save_cache(mode, root_paths, cover_paths, dict(all_tags), cover_map, DATA_DIR)
-                except Exception: # スレッド内の例外は握りつぶさずログに残す
-                    import traceback; print(f"Cache rebuild error ({mode}): {traceback.format_exc()}")
-        threading.Thread(target=locked_build).start()
+        # 全再構築はしない (再構築は保存時の batch_edit に一本化)。
+        # 代わりにキャッシュから削除項目だけを即時除去し、保存前に同じフォルダへ
+        # 再入場しても削除済みアイテムが旧キャッシュから「復活」しないようにする。
+        cache_res = logic.remove_item_from_cache(mode, full_path, DATA_DIR)
+        if cache_res['status'] == 'error': print(f"Cache patch error ({mode}): {cache_res['message']}") # 失敗しても致命的ではない (保存時の全再構築で整合する)
     try:
         rclone_result = rsync.sync_delete(full_path, is_dir, BASE_DIRS, RCLONE_CONFIG) # ロック外でクラウド同期
     except Exception as e: # ローカル削除は完了済みのため、同期失敗で 500 を返さない (二重の保険)

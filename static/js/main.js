@@ -13,7 +13,10 @@ document.addEventListener('DOMContentLoaded', async () => { // 初期化処理
     browsePath(new URLSearchParams(window.location.search).get('path') || ''); setupEventListeners();
 });
 async function browsePath(path, pushState = true) { // フォルダ閲覧処理
-    const currentRenderId = ++appState.renderingId; ui.showLoading(true); appState.inSearchMode = false; appState.selectedTags = []; appState.searchQuery = ''; ui.renderTagFilter();
+    const currentRenderId = ++appState.renderingId; ui.showLoading(true); appState.inSearchMode = false;
+    if (!appState.keepFilterState) { appState.selectedTags = []; appState.excludedTags = []; appState.searchQuery = ''; appState.sortMode = 'default'; } // 明示的リセット以外は状態維持（作品往復・root 復帰でも保持）
+    appState.keepFilterState = false; // フラグは一度きり
+    ui.renderTagFilter();
     try {
         const data = await api.browse(appState.mode, path || ''); if (currentRenderId !== appState.renderingId) { console.log("期限切れの browse リクエストを無視します"); return; }
         if (!data.error) { appState.currentPath = data.current_path; appState.isRoot = data.is_root; appState.currentSource = data.source; appState.isRebuilding = data.is_rebuilding; ui.renderTelemetry();if (pushState) { const url = new URL(window.location); url.searchParams.set('mode', appState.mode); url.searchParams.set('path', path || ''); window.history.pushState({ path: path || '', mode: appState.mode }, '', url); } ui.renderContent(data); }
@@ -26,20 +29,59 @@ function updateEditButtonUI() { // タグ編集UI更新
     menu.style.display = 'none';
 }
 async function performSearch(query, type) { // 検索処理
-    const currentRenderId = ++appState.renderingId; ui.showLoading(true); appState.inSearchMode = true; appState.searchQuery = Array.isArray(query) ? query.join('+') : query; appState.searchType = type;
+    const currentRenderId = ++appState.renderingId; ui.showLoading(true); appState.inSearchMode = true; appState.selectedTags = []; appState.excludedTags = []; appState.searchQuery = Array.isArray(query) ? query.join('+') : query; appState.searchType = type;
     try { const data = await api.search(appState.mode, query, type); if (currentRenderId !== appState.renderingId) { console.log("期限切れの search リクエストを無視します"); return; } appState.currentSource = data.source; appState.isRebuilding = data.is_rebuilding; ui.renderTelemetry(); ui.renderContent({ items: data.items, current_path: 'SEARCH', is_root: false }); }
     catch (e) { console.error(e); } finally { if (currentRenderId === appState.renderingId) ui.showLoading(false); }
 }
+function resetView() { // 並び順・タグ絞り込み・検索をすべてクリアし、現在のフォルダを素の状態で再表示
+    appState.sortMode = 'default'; appState.selectedTags = []; appState.excludedTags = []; appState.searchQuery = '';
+    document.getElementById('search-input').value = ''; // 検索ボックスも空に
+    appState.keepFilterState = false; // 明示リセットなので保持しない
+    appState.inSearchMode ? browsePath('') : browsePath(appState.currentPath); // 検索中だった場合は root、通常閲覧なら現在地を素で再取得
+}
+async function applyRootFilter() { // ROOT に対するタグ絞り込み・ソートの統一適用（正選は検索性、反選・ソートはローカル）
+    const currentRenderId = ++appState.renderingId; ui.showLoading(true);
+    appState.inSearchMode = false; appState.searchQuery = ''; document.getElementById('search-input').value = '';
+    ui.renderTagFilter(); // フィルタバーのハイライトを即時更新（この時点で ROOT 表示になるため可視）
+    try {
+        let data;
+        if (appState.selectedTags.length > 0) { // 正選あり：後端タグ検索で全階層から該当項目を収集（AND）
+            data = await api.search(appState.mode, appState.selectedTags, 'tag');
+            if (currentRenderId !== appState.renderingId) return;
+            appState.isRoot = true; appState.currentPath = ''; // 論理的に ROOT ビュー扱い
+            appState.currentSource = data.source; appState.isRebuilding = data.is_rebuilding; ui.renderTelemetry();
+            // 検索結果を ROOT データセットとして描画（is_root=true で grid-view を維持）
+            ui.renderContent({ items: data.items, current_path: '', is_root: true, breadcrumbs: [{ name: 'ROOT', path: '' }] });
+        } else { // 正選なし（反選のみ or 素のソート）：ROOT の素の一覧を取得してローカル変換
+            appState.keepFilterState = true; // browsePath 内での状態クリアを抑止
+            await browsePath('', true);
+            if (currentRenderId !== appState.renderingId) return;
+        }
+    } catch (e) { console.error(e); } finally { if (currentRenderId === appState.renderingId) ui.showLoading(false); }
+}
 function setupEventListeners() { // 全イベントリスナーの登録
     window.addEventListener('popstate', (e) => { if (e.state) { if (e.state.mode && e.state.mode !== appState.mode) { appState.mode = e.state.mode; document.getElementById('mode-selector').value = appState.mode; } browsePath(e.state.path, false); } else browsePath('', false); });
-    window.addEventListener('browse-path', (e) => browsePath(e.detail, true));
-    window.addEventListener('browse-root', () => { console.log("⚠️ ルートディレクトリへの戻りリクエストを受信。検索モードを終了し状態をリセットします..."); browsePath(''); });
-    window.addEventListener('go-back', () => browsePath(appState.currentPath.split(/[\\/]/).slice(0, -1).join('/'), true));
-    window.addEventListener('refresh-view', () => browsePath(appState.currentPath));
-    window.addEventListener('toggle-tag', (e) => { const tag = e.detail; appState.selectedTags.includes(tag) ? appState.selectedTags = appState.selectedTags.filter(t => t !== tag) : appState.selectedTags.push(tag); ui.renderTagFilter(); appState.selectedTags.length > 0 ? performSearch(appState.selectedTags, 'tag') : browsePath(''); });
+    window.addEventListener('browse-path', (e) => { appState.keepFilterState = true; browsePath(e.detail, true); }); // 目録移動でも絞り込み状態を維持
+    window.addEventListener('browse-root', () => { appState.keepFilterState = true; browsePath(''); }); // root 復帰でも維持（明示リセットは reset-view で）
+    window.addEventListener('go-back', () => { appState.keepFilterState = true; browsePath(appState.currentPath.split(/[\\/]/).slice(0, -1).join('/'), true); });
+    window.addEventListener('refresh-view', () => { appState.keepFilterState = true; browsePath(appState.currentPath); });
+    window.addEventListener('toggle-tag', (e) => { // タグクリック：左=正選(検索性) / 右=反選。常に ROOT に対する絞り込みとして扱う
+        const { tag, mode } = e.detail;
+        if (mode === 'exclude') { // 反選トグル（正選から外して排他管理）
+            appState.selectedTags = appState.selectedTags.filter(t => t !== tag);
+            appState.excludedTags.includes(tag) ? appState.excludedTags = appState.excludedTags.filter(t => t !== tag) : appState.excludedTags.push(tag);
+        } else { // 正選トグル
+            appState.excludedTags = appState.excludedTags.filter(t => t !== tag);
+            appState.selectedTags.includes(tag) ? appState.selectedTags = appState.selectedTags.filter(t => t !== tag) : appState.selectedTags.push(tag);
+        }
+        applyRootFilter(); // ROOT へ移動しつつ絞り込みを反映（深層目録から押しても ROOT に戻る）
+    });
+    window.addEventListener('tag-controls-changed', () => applyRootFilter()); // ソート切替も ROOT ビューに対して適用
+    window.addEventListener('reset-view', () => resetView()); // default / 重置ボタン共通のリセット処理
     document.getElementById('open-local-folder-btn').onclick = async () => { if (!appState.currentPath || appState.currentPath === 'SEARCH') { alert("現在、ローカルフォルダを特定できません"); return; } const res = await api.openFolder(appState.currentPath); if (res.status !== 'success') alert("フォルダを開けません: " + (res.message || "不明なエラー")); };
-    document.getElementById('mode-selector').addEventListener('change', (e) => { appState.mode = e.target.value; appState.selectedTags = []; appState.pathStack = []; ui.renderTagFilter(); browsePath(''); });
+    document.getElementById('mode-selector').addEventListener('change', (e) => { appState.mode = e.target.value; appState.selectedTags = []; appState.excludedTags = []; appState.sortMode = 'default'; appState.searchQuery = ''; appState.pathStack = []; appState.keepFilterState = false; document.getElementById('search-input').value = ''; ui.renderTagFilter(); browsePath(''); }); // モード切替＝別データ源のため並び順・タグ絞り込み・検索を完全リセット
     document.getElementById('search-btn').onclick = () => { const q = document.getElementById('search-input').value.trim(); if (q) performSearch(q, 'keyword'); };
+    document.getElementById('reset-btn').onclick = () => window.dispatchEvent(new CustomEvent('reset-view')); // 重置：default と完全同一挙動
     document.getElementById('search-input').onkeydown = (e) => { if (e.key === 'Enter') document.getElementById('search-btn').click(); };
     document.getElementById('stats-btn').onclick = () => { const browseView = document.getElementById('browse-view'), statsView = document.getElementById('stats-view'); if (statsView.style.display === 'none') { browseView.style.display = 'none'; statsView.style.display = 'block'; document.getElementById('tag-filter-container').style.display = 'none'; document.getElementById('directory-header').style.display = 'none'; ui.renderStatsView(); } else { statsView.style.display = 'none'; browseView.style.display = 'block'; (!appState.inSearchMode && !appState.isRoot) ? document.getElementById('directory-header').style.display = 'flex' : document.getElementById('tag-filter-container').style.display = 'block'; } };
     document.getElementById('maintenance-btn').onclick = () => { const menu = document.getElementById('maintenance-menu'); menu.style.display = menu.style.display === 'block' ? 'none' : 'block'; };
@@ -47,18 +89,20 @@ function setupEventListeners() { // 全イベントリスナーの登録
         if (!appState.isTagEditMode) { 
             appState.isTagEditMode = true; 
             appState.tempTagsData = JSON.parse(JSON.stringify(appState.tagsData)); 
-            appState.pendingRenames = appState.pendingRenames || {}; 
+            appState.pendingRenames = appState.pendingRenames || {}; appState.pendingDeletes = [];
             updateEditButtonUI(); 
             ui.renderTelemetry();
             if (appState.currentDataSet) ui.refreshAllTagsUI(); 
         } else { 
             ui.showLoading(true); 
             try {
+                (appState.pendingDeletes || []).forEach(key => { delete appState.tempTagsData[key]; });
                 const res = await api.saveBatchEdits(appState.mode, appState.tempTagsData, appState.pendingRenames || {});
                 if (res.status === 'success') {
                     appState.tagsData = appState.tempTagsData; 
                     appState.isTagEditMode = false; 
                     appState.pendingRenames = {}; 
+                    appState.pendingDeletes = [];
                     updateEditButtonUI(); 
                     appState.isRebuilding = true;
                     appState.currentSource = 'disk';

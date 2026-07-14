@@ -1,5 +1,10 @@
 async function fetchJson(url, options = {}) { // 汎用JSONフェッチ関数
-    try { const res = await fetch(url, options); if (!res.ok) throw new Error(`HTTP ${res.status}`); return await res.json(); }
+    try {
+        const res = await fetch(url, options);
+        const body = await res.json().catch(() => null); // 非2xxでもサーバーのエラー詳細(message)を拾う
+        if (!res.ok) return body || { status: "error", error: `HTTP ${res.status}` }; // バックエンドが返した理由(ファイル使用中など)をそのまま通す
+        return body;
+    }
     catch (err) { console.error("APIエラー:", err); return { error: err.message }; }
 }
 export const browse = (mode, path = '') => fetchJson(`/api/browse?mode=${mode}&path=${encodeURIComponent(path)}`); // フォルダ参照

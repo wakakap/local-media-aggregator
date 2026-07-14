@@ -75,7 +75,11 @@ input[type="text"] { width: 250px; }
 #tag-filter-scroll { display: flex; flex-wrap: wrap; gap: 8px; }
 .filter-tag { font-size: 12px; padding: 3px 8px; border-radius: 4px; background-color: #444; cursor: pointer; color: #ddd; }
 .filter-tag:hover { background-color: #666; }
-.filter-tag.highlighted { background-color: #D9534F; color: white; font-weight: bold; }
+.filter-tag.excluded { background-color: #8e44ad; color: white; font-weight: bold; } /* 反選タグ（右クリック）は紫で区別 */
+.card-tag { user-select: none; } /* 右クリック反選時の文字選択を防止 */
+.control-tag { background-color: #3a4a5a; font-weight: bold; } /* ソート・反選ボタンは通常タグと色分け */
+.control-tag:hover { background-color: #4a5a6a; }
+.filter-tag.highlighted { background-color: #D9534F; color: white; font-weight: bold; } /* 正選タグ・選択中ソートは赤（.control-tag より後に定義して優先させる） */
 #tag-filter-expand-btn { position: absolute; top: 8px; right: 10px; width: 24px; height: 24px; padding: 0; }
 #maintenance-menu { display: none; position: absolute; top: 100%; right: 0; background-color: var(--card-background-color); border: 1px solid var(--card-border-color); z-index: 1000; padding: 5px; min-width: 120px; border-radius: 4px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
 #maintenance-menu .button { width: 100%; text-align: left; margin-bottom: 5px; border: none; }
@@ -122,6 +126,7 @@ input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
 .histogram-bar { opacity: 0.8; cursor: pointer; min-width: 2px; border-radius: 1px 1px 0 0; transition: background-color 0.1s, opacity 0.1s; }
 .card-delete-btn { display: none; position: absolute; top: 4px; right: 4px; z-index: 3; width: 18px; height: 18px; line-height: 17px; text-align: center; font-size: 13px; color: #fff; background-color: rgba(198, 40, 40, 0.9); border-radius: 50%; cursor: pointer; user-select: none; } /* カード右上の削除ボタン (編集モード時のみ表示) */
 .card-delete-btn:hover { background-color: #ff1744; transform: scale(1.15); }
+.card-size-badge { position: absolute; top: 4px; left: 4px; z-index: 3; padding: 2px 6px; font-size: 11px; font-weight: bold; color: #fff; background-color: rgba(0, 0, 0, 0.6); border-radius: 4px; pointer-events: none; } /* カード左上の作品体積表示 */
 .row-delete-btn { display: none; margin-left: 10px; width: 18px; height: 18px; line-height: 17px; text-align: center; font-size: 13px; color: #fff; background-color: rgba(198, 40, 40, 0.9); border-radius: 50%; cursor: pointer; flex-shrink: 0; user-select: none; } /* リスト行右側の削除ボタン */
 .row-delete-btn:hover { background-color: #ff1744; }
 body.tag-edit-mode .card-delete-btn, body.tag-edit-mode .row-delete-btn { display: block; }

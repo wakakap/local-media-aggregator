@@ -1,5 +1,6 @@
 import { appState, playerState, viewerState, textState } from './state.js';
 import * as api from './api.js';
+import { formatBytes } from './helpers.js'; // カード体積表示用
 function safeEncodePath(path) { return path ? path.split('/').map(encodeURIComponent).join('/') : ''; } // パスのエンコード処理
 let epubBook = null, epubRendition = null; // Epub関連変数
 const mediaContainer = document.getElementById('media-container'), breadcrumbContainer = document.getElementById('breadcrumb-container');
@@ -18,26 +19,59 @@ let preloadObserver = null, readObserver = null, visibleRatios = {}, isJumping =
 let audioContext = null, analyser = null, dataArray = null, source = null, animationId = null, isVisualizerInited = false, stars = []; // ビジュアライザー変数
 const VISUALIZER_CONFIG = { barCount: 64, starCount: 50 }; // ビジュアライザー設定
 export function showLoading(show) { loadingIndicator.style.display = show ? 'block' : 'none'; } // ローディング表示切替
-export function renderContent(data) { // メインコンテンツの描画
+export function renderContent(data) { // 新しいデータセットを受け取り、原順序を記録してビューを初期化
     appState.currentDataSet = data;
+    appState.currentDataSet._originalItems = (data.items || []).slice(); // 後端が返した原順序をスナップショット保持（ソート復元用）
     mediaContainer.innerHTML = '';
     if (appState.inSearchMode || data.is_root) { mediaContainer.className = 'grid-view'; directoryHeader.style.display = 'none'; tagFilterContainer.style.display = 'block'; }
     else { mediaContainer.className = 'list-view'; tagFilterContainer.style.display = 'none'; renderDirectoryHeader(data.metadata); }
     renderBreadcrumbs(appState.inSearchMode ? 'SEARCH' : data.current_path, data.breadcrumbs);
-    if (!data.items || data.items.length === 0) {
-        const msg = document.createElement('div'); msg.style.padding = '20px'; msg.style.color = '#888'; msg.textContent = 'このフォルダは空です'; mediaContainer.appendChild(msg);
-        return;
+    renderCurrentView(); // 実際の描画（ソート・正選・反選を適用）は共通関数に委譲
+}
+export function renderCurrentView() { // 現在の状態を適用して描画（タグ絞り込み・ソートは ROOT 専用、深層目録は常に既定表示）
+    if (!appState.currentDataSet) return;
+    const base = appState.currentDataSet._originalItems || []; // 常に原順序を起点にする
+    const isRootView = appState.isRoot || appState.inSearchMode; // ROOT または検索結果ビューのみ絞り込み・ソート対象
+    const items = isRootView ? applySortToItems(filterItemsByTags(base)) : base.slice(); // 深層目録は無加工でそのまま
+    appState.currentDataSet.items = items; // クリック時の item 逆引き用に現在の可視リストを保持
+    mediaContainer.innerHTML = '';
+    if (items.length === 0) {
+        const msg = document.createElement('div'); msg.style.padding = '20px'; msg.style.color = '#888'; msg.textContent = '該当するアイテムがありません'; mediaContainer.appendChild(msg);
+        viewerState.fileList = []; return;
     }
-    viewerState.fileList = data.items.filter(i => !i.is_dir && ['image', 'video', 'audio', 'subtitle'].includes(i.media_type));
+    viewerState.fileList = items.filter(i => !i.is_dir && ['image', 'video', 'audio', 'subtitle'].includes(i.media_type));
     const CHUNK_SIZE = 50; let currentIndex = 0; // チャンク分割描画による最適化
     function renderChunk() {
-        const end = Math.min(currentIndex + CHUNK_SIZE, data.items.length), fragment = document.createDocumentFragment();
-        for (let i = currentIndex; i < end; i++) { mediaContainer.className === 'grid-view' ? renderCard(data.items[i], fragment) : renderFileRow(data.items[i], fragment); }
+        const end = Math.min(currentIndex + CHUNK_SIZE, items.length), fragment = document.createDocumentFragment();
+        for (let i = currentIndex; i < end; i++) { mediaContainer.className === 'grid-view' ? renderCard(items[i], fragment) : renderFileRow(items[i], fragment); }
         mediaContainer.appendChild(fragment);
         currentIndex = end;
-        if (currentIndex < data.items.length) requestAnimationFrame(renderChunk);
+        if (currentIndex < items.length) requestAnimationFrame(renderChunk);
     }
     renderChunk();
+}
+function tagsOfItem(item) { // アイテムの可視タグ配列を取得（item.tags 優先、無ければ tagsData から合成キーで引く）
+    if (Array.isArray(item.tags) && item.tags.length) return item.tags.filter(t => !t.startsWith('*'));
+    const key = `${appState.mode}:${item.is_dir ? item.media_path : item.media_path.replace(/\.[^/.]+$/, "")}`; // renderTags と同じ合成キー規則
+    return (appState.tagsData[key] || []).filter(t => !t.startsWith('*'));
+}
+function filterItemsByTags(items) { // 正選（AND）と反選（OR除外）を現在の目録内アイテムに適用
+    if (appState.selectedTags.length === 0 && appState.excludedTags.length === 0) return items.slice(); // 絞り込み無し
+    return items.filter(item => {
+        const tags = tagsOfItem(item);
+        if (appState.selectedTags.length && !appState.selectedTags.every(sel => tags.includes(sel))) return false; // 正選：全て含む必要あり
+        if (appState.excludedTags.length && appState.excludedTags.some(ex => tags.includes(ex))) return false;     // 反選：いずれか含めば除外
+        return true;
+    });
+}
+function applySortToItems(items) { // カードソート処理（非破壊：渡された配列のコピーを並べ替えて返す）
+    if (appState.sortMode === 'default') return items; // 未選択時はそのままの順序
+    return items.slice().sort((a, b) => {
+        if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1; // フォルダは常に先頭グループに固定
+        if (appState.sortMode === 'name') return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }); // 文字・数値混在に対応した自然順
+        if (appState.sortMode === 'size') { const sa = a.total_size || a.size || 0, sb = b.total_size || b.size || 0; return sb - sa; } // 大きい順（総体積 or ファイルサイズ）
+        return 0;
+    });
 }
 function getTagCounts() { // タグの出現回数集計
     if (_cachedTagCounts && _lastTagsDataRef === appState.tagsData && _lastMode === appState.mode) return _cachedTagCounts;
@@ -85,6 +119,7 @@ function renderCard(item, targetElement = mediaContainer) { // グリッドカ�
     const delBtn = document.createElement('span'); delBtn.className = 'card-delete-btn'; delBtn.textContent = '×'; delBtn.title = '削除'; // 編集モード時のみCSSで表示
     delBtn.onclick = (e) => { e.stopPropagation(); handleDeleteItem(item, card); };
     card.appendChild(delBtn);
+    if (item.is_dir && item.total_size) { const sizeBadge = document.createElement('span'); sizeBadge.className = 'card-size-badge'; sizeBadge.textContent = formatBytes(item.total_size); card.appendChild(sizeBadge); } // 最外層作品フォルダの総体積を左上に表示
     targetElement.appendChild(clone);
 }
 function renderFileRow(item, targetElement = mediaContainer) { // リスト行の描画
@@ -118,8 +153,12 @@ export function renderTags(container, item) { // タグの描画
         container.appendChild(addBtn);
     } else {
         visibleTags.forEach(tag => {
-            const span = document.createElement('span'); span.className = 'card-tag'; span.textContent = tag; span.style.backgroundColor = appState.selectedTags.includes(tag) ? '#D9534F' : '#555';
-            span.onclick = (e) => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('toggle-tag', { detail: tag })); }; container.appendChild(span);
+            const span = document.createElement('span'); span.className = 'card-tag';
+            span.style.backgroundColor = appState.excludedTags.includes(tag) ? '#8e44ad' : (appState.selectedTags.includes(tag) ? '#D9534F' : '#555'); // 反選=紫 / 正選=赤 / 通常=灰
+            span.textContent = tag;
+            span.onclick = (e) => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('toggle-tag', { detail: { tag, mode: 'select' } })); }; // 左クリック：正選トグル
+            span.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); window.dispatchEvent(new CustomEvent('toggle-tag', { detail: { tag, mode: 'exclude' } })); }; // 右クリック：反選トグル
+            container.appendChild(span);
         });
     }
 }
@@ -352,16 +391,38 @@ async function handleDeleteItem(item, elem) { // 削除処理 (二重確認 → 
         if (appState.currentDataSet && appState.currentDataSet.items) appState.currentDataSet.items = appState.currentDataSet.items.filter(i => i !== item); // 状態からも除去
         viewerState.fileList = viewerState.fileList.filter(i => i !== item); // ビューアのインデックスずれ防止
         const compositeKey = `${appState.mode}:${item.is_dir ? item.media_path : item.media_path.replace(/\.[^/.]+$/, "")}`;
-        if (appState.tempTagsData) delete appState.tempTagsData[compositeKey];
+        if (appState.pendingDeletes) appState.pendingDeletes.push(compositeKey); // タグ破棄はディスク削除時に即時反映せず、保存時にまとめて処理（削除直後に同名フォルダを補充する運用に対応）
         notifyRcloneResult(res.rclone);
     } else alert('削除失敗: ' + (res.message || res.error || '不明なエラー'));
 }
 export function renderTagFilter() { // タグフィルターUI構築
     const container = document.getElementById('tag-filter-scroll'); container.innerHTML = ''; const counts = {};
+    renderSortControls(container); // タグ一覧の最前面に default / 文字順 / サイズ順 ボタンを配置
     Object.keys(appState.tagsData).forEach(k => { if(k.startsWith(appState.mode)) appState.tagsData[k].forEach(t => { if(!t.startsWith('*')) counts[t] = (counts[t]||0)+1; }); });
     Object.entries(counts).sort((a,b) => b[1]-a[1]).forEach(([tag, count]) => {
-        const span = document.createElement('span'); span.className = 'filter-tag'; if(appState.selectedTags.includes(tag)) span.classList.add('highlighted');
-        span.textContent = `${tag} (${count})`; span.onclick = () => window.dispatchEvent(new CustomEvent('toggle-tag', { detail: tag })); container.appendChild(span);
+        const span = document.createElement('span'); span.className = 'filter-tag';
+        if (appState.excludedTags.includes(tag)) span.classList.add('excluded'); else if (appState.selectedTags.includes(tag)) span.classList.add('highlighted'); // 反選=紫 / 正選=赤
+        span.textContent = `${tag} (${count})`;
+        span.onclick = () => window.dispatchEvent(new CustomEvent('toggle-tag', { detail: { tag, mode: 'select' } })); // 左クリック：正選
+        span.oncontextmenu = (e) => { e.preventDefault(); window.dispatchEvent(new CustomEvent('toggle-tag', { detail: { tag, mode: 'exclude' } })); }; // 右クリック：反選
+        container.appendChild(span);
+    });
+}
+function renderSortControls(container) { // 並べ替え制御ボタン生成（default / 文字順 / サイズ順、filter-tag スタイルを流用）
+    const defs = [ // [ラベル, 状態値]
+        { label: 'default', value: 'default' }, // 全リセット（並び順・タグ絞り込み・検索をクリア）
+        { label: '文字順', value: 'name' },     // 按字符顺序
+        { label: 'サイズ順', value: 'size' }    // 按大小排序
+    ];
+    defs.forEach(def => {
+        const btn = document.createElement('span'); btn.className = 'filter-tag control-tag'; btn.textContent = def.label;
+        if (def.value === 'default') { if (appState.sortMode === 'default') btn.classList.add('highlighted'); } // default はソート未指定時にハイライト
+        else if (appState.sortMode === def.value) btn.classList.add('highlighted');
+        btn.onclick = () => {
+            if (def.value === 'default') window.dispatchEvent(new CustomEvent('reset-view')); // 全リセット（重置ボタンと同一挙動）
+            else { appState.sortMode = (appState.sortMode === def.value) ? 'default' : def.value; window.dispatchEvent(new CustomEvent('tag-controls-changed')); } // ソートのトグル
+        };
+        container.appendChild(btn);
     });
 }
 function parseVTT(vttText) { // VTT字幕パース

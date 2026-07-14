@@ -252,14 +252,10 @@ def api_delete_item(): # アイテムの物理削除 (ローカル削除 + タ�
     is_dir = os.path.isdir(full_path) # 削除前に種別を確定 (削除後は判定不能になるため)
     global all_tags
     with TAGS_LOCK:
-        res = logic.delete_item_and_clean_tags(mode, full_path, TAGS_FILE_PATH, root_paths[active_idx], USE_RECYCLE_BIN)
+        res = logic.delete_file_only(full_path, USE_RECYCLE_BIN)
         if res['status'] != 'success': return jsonify(res), 500
-        all_tags = logic.load_tags(TAGS_FILE_PATH)
-        # 全再構築はしない (再構築は保存時の batch_edit に一本化)。
-        # 代わりにキャッシュから削除項目だけを即時除去し、保存前に同じフォルダへ
-        # 再入場しても削除済みアイテムが旧キャッシュから「復活」しないようにする。
-        cache_res = logic.remove_item_from_cache(mode, full_path, DATA_DIR)
-        if cache_res['status'] == 'error': print(f"Cache patch error ({mode}): {cache_res['message']}") # 失敗しても致命的ではない (保存時の全再構築で整合する)
+        cache_res = logic.remove_item_from_cache(mode, full_path, DATA_DIR) # キャッシュから即時除去(タグは残す)
+        if cache_res['status'] == 'error': print(f"Cache patch error ({mode}): {cache_res['message']}")
     try:
         rclone_result = rsync.sync_delete(full_path, is_dir, BASE_DIRS, RCLONE_CONFIG) # ロック外でクラウド同期
     except Exception as e: # ローカル削除は完了済みのため、同期失敗で 500 を返さない (二重の保険)

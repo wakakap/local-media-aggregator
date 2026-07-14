@@ -7,14 +7,18 @@ export const appState = {
     tagsData: {},        // グローバルタグキャッシュ
     tempTagsData: {},    // 編集モード中の一時タグデータ
     pendingRenames: {},  // 未保存のリネーム操作を一時保持する辞書
+    pendingDeletes: [],  // 未保存の削除に伴うタグ破棄対象キーを一時保持する配列
     isTagEditMode: false,// タグ編集モード状態
-    selectedTags: [],    // 選択されたフィルタータグ
     searchQuery: '',     // 現在の検索キーワード
     inSearchMode: false, // 検索結果ビュー状態
     currentSource: '',   // 現在のデータソース ('cache' または 'disk')
     isRebuilding: false, // バックグラウンドでキャッシュ構築中かどうか
     renderingId: 0,      // 非同期レンダリングの競合防止ID
-    activeImports: {}    // 実行中の自動インポートタスク
+    activeImports: {},   // 実行中の自動インポートタスク
+    sortMode: 'default', // カードの並び順 ('default' | 'name' | 'size')
+    selectedTags: [],    // 正選タグ（左クリック）：全て含むカードのみ表示（AND）
+    excludedTags: [],    // 反選タグ（右クリック）：いずれか含むカードを除外（OR）
+    keepFilterState: false // フォルダ遷移をまたいで並び順・タグ絞り込みを維持するフラグ
 };
 
 export const playerState = {

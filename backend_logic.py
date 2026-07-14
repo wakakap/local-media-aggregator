@@ -203,6 +203,16 @@ def get_game_cover_thumbnail(full_path, cover_path, base_name): # ゲーム用�
         print(f"Cover extraction failed for {full_path}: {e}")
         return None
 
+def calc_folder_total_size(folder_path): # フォルダ配下の全ファイル総体積を集計（最外層作品のみで使用）
+    total = 0
+    for root, _dirs, files in os.walk(folder_path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass # 壊れたシンボリックリンク / アクセス不可ファイルは無視して継続
+    return total
+
 def _create_item_data(full_path, root_path, cover_path, all_tags, cover_map, mode, allow_thumbnail_gen=True): # アイテムデータの生成
     item_name = os.path.basename(full_path)
     is_dir = os.path.isdir(full_path)
@@ -238,6 +248,7 @@ def _create_item_data(full_path, root_path, cover_path, all_tags, cover_map, mod
                     data["cover_source"] = "local"
             if source_image_path and allow_thumbnail_gen:
                 data["thumbnail_filename"] = get_or_create_thumbnail(source_image_path, cover_path, name_no_ext)
+            if allow_thumbnail_gen and not is_savedata: data["total_size"] = calc_folder_total_size(full_path) # 最外層作品フォルダのみ総体積を付与（allow_thumbnail_gen が最外層の判定を兼ねる）
     else: data["media_type"] = get_file_media_type(item_name)
     return data
 
@@ -450,6 +461,21 @@ def delete_item_and_clean_tags(mode, target_path, tags_path, root_path, use_recy
         tags = load_tags(tags_path) # 削除対象とその配下のタグキーをすべて除去
         updated = {k: v for k, v in tags.items() if not (k == prefix or k.startswith(prefix + "/"))}
         if len(updated) != len(tags): save_tags(tags_path, updated)
+        return {"status": "success", "is_dir": is_dir, "deleted_via": deleted_via}
+    except Exception as e: return {"status": "error", "message": str(e)}
+
+def delete_file_only(target_path, use_recycle_bin=True): # 物理削除のみ (タグ掃除は保存時に遅延実行)
+    try:
+        is_dir = os.path.isdir(target_path)
+        deleted_via = "permanent"
+        if use_recycle_bin: # 可能ならゴミ箱へ移動 (誤削除からの復元を可能にする)
+            try:
+                from send2trash import send2trash
+                send2trash(target_path); deleted_via = "recycle_bin"
+            except ImportError:
+                shutil.rmtree(target_path) if is_dir else os.remove(target_path)
+        else:
+            shutil.rmtree(target_path) if is_dir else os.remove(target_path)
         return {"status": "success", "is_dir": is_dir, "deleted_via": deleted_via}
     except Exception as e: return {"status": "error", "message": str(e)}
 

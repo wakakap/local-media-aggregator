@@ -55,15 +55,22 @@ def save_stats(stats_file_path, data): # 統計データの保存（アトミッ
             raise
     except Exception as e: print(f"Save stats error: {e}")
 
-def get_first_image_in_directory(directory_path): # フォルダ内の最初の画像を取得
+def get_first_image_in_directory(directory_path, allow_subdir_fallback=True): # フォルダ内の最初の画像を取得
     if not os.path.isdir(directory_path): return None
     try:
         files = os.listdir(directory_path)
         images = [f for f in files if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS]
         images = [f for f in images if os.path.isfile(os.path.join(directory_path, f))]
-        if not images: return None
-        images.sort(key=natural_sort_key)
-        return images[0]
+        if images:
+            images.sort(key=natural_sort_key)
+            return images[0]
+        if allow_subdir_fallback: # 直下に画像が無ければ、最初のサブフォルダ内で一度だけ再試行（それでも無ければ諦める）
+            subdirs = [f for f in files if not f.startswith('.') and os.path.isdir(os.path.join(directory_path, f))]
+            if subdirs:
+                subdirs.sort(key=natural_sort_key)
+                inner = get_first_image_in_directory(os.path.join(directory_path, subdirs[0]), allow_subdir_fallback=False)
+                if inner: return f"{subdirs[0]}/{inner}"
+        return None
     except: return None
 
 def natural_sort_key(s): # 自然順ソートのキー生成
@@ -152,7 +159,7 @@ def get_or_create_thumbnail(source_path, cover_root_path, thumbnail_base_name, s
         print(f"Thumbnail generation failed for {source_path}: {e}")
         return None
 
-def get_game_cover_thumbnail(full_path, cover_path, base_name): # ゲーム用サムネイルの抽出
+def get_game_cover_thumbnail(full_path, cover_path, base_name, allow_subdir_fallback=True): # ゲーム用サムネイルの抽出
     if not os.path.isdir(full_path): return None
     thumbnail_dir = os.path.join(cover_path, "THUMBNAILS")
     try:
@@ -171,7 +178,13 @@ def get_game_cover_thumbnail(full_path, cover_path, base_name): # ゲーム用�
                 best_ext = ext
                 best_file = os.path.join(full_path, found_files[ext][0])
                 break
-        if not best_file: return None
+        if not best_file:
+            if allow_subdir_fallback: # 直下に素材が無ければ、最初のサブフォルダ内で一度だけ再試行（それでも無ければ諦める）
+                subdirs = [f for f in os.listdir(full_path) if not f.startswith('.') and os.path.isdir(os.path.join(full_path, f))]
+                if subdirs:
+                    subdirs.sort(key=natural_sort_key)
+                    return get_game_cover_thumbnail(os.path.join(full_path, subdirs[0]), cover_path, base_name, allow_subdir_fallback=False)
+            return None
         if best_ext != '.exe': return get_or_create_thumbnail(best_file, cover_path, base_name)
         target_exe = best_file
         thumbnail_filename = f"{base_name}_exe.png"
@@ -302,37 +315,6 @@ def get_directory_metadata(full_path, root_path, cover_path, all_tags, cover_map
             if parent_dir == current_check_path: break 
             current_check_path = parent_dir
     return {"name": dir_name, "name_no_ext": dir_name, "media_path": rel_dir, "cover_filename": found_cover, "cover_source": cover_source}
-
-def search_all(root_path, cover_path, all_tags, cover_map, keyword, mode): # 全体検索
-    keyword_lower = keyword.lower()
-    found_paths = set()
-    try:
-        for name in os.listdir(root_path):
-            if name.startswith('.'): continue
-            full_path = os.path.join(root_path, name)
-            if keyword_lower in name.lower(): 
-                found_paths.add(full_path)
-                continue
-            rel_path = name
-            item_key = rel_path if os.path.isdir(full_path) else os.path.splitext(rel_path)[0]
-            composite_key = f"{mode.upper()}:{item_key}"
-            if any(keyword_lower in tag.lower() for tag in all_tags.get(composite_key, [])): found_paths.add(full_path)
-    except Exception: pass
-    results = [_create_item_data(p, root_path, cover_path, all_tags, cover_map, mode) for p in found_paths]
-    return results
-
-def search_by_tag(root_path, cover_path, all_tags, cover_map, tag_list, mode): # タグによる検索
-    target_keys = {k.split(':', 1)[1] for k, v in all_tags.items() if k.startswith(f"{mode.upper()}:") and all(t in v for t in tag_list)}
-    found_paths = set()
-    for root, dirs, files in os.walk(root_path):
-        for name in dirs + files:
-            full_path = os.path.join(root, name)
-            rel_path = os.path.relpath(full_path, root_path).replace('\\', '/')
-            item_key = rel_path if os.path.isdir(full_path) else os.path.splitext(rel_path)[0]
-            if item_key in target_keys: found_paths.add(full_path)
-        dirs[:] = [d for d in dirs if not is_gallery(os.path.join(root, d))]
-    results = [_create_item_data(p, root_path, cover_path, all_tags, cover_map, mode) for p in found_paths]
-    return results
 
 def get_stats_data(tags_file_path): # 統計データのパース
     stats = []
@@ -618,7 +600,7 @@ def get_structured_stats_from_cache(stats_file_path, data_dir, limit=20): # キ�
         else: display_name = item_name
         path_map = caches.get(mode, {})
         full_path = path_map.get(item_name)
-        results.append({"name": display_name, "full_path": full_path or item_name, "mode": mode, "views": folder_views, "total": folder_views, "nodes": sub_nodes, "isLeaf": False})
+        results.append({"name": display_name, "item_key": item_name, "full_path": full_path or item_name, "mode": mode, "views": folder_views, "total": folder_views, "nodes": sub_nodes, "isLeaf": False}) # item_key: フロントの閲覧記録用に正確な統計キーを渡す
     return results
 
 def export_tree_structure_from_cache(modes_config, data_dir): # キャッシュからのツリー構造エクスポート
@@ -665,6 +647,12 @@ def clean_orphaned_data(base_dirs, modes_config, tags_path, stats_path): # 無�
         return {
             "status": "error",
             "message": f"以下のドライブが接続されていないため中止しました: {unreachable}"
+        }
+    missing_modes = [m for m, cfg in modes_config.items() if not any(os.path.exists(os.path.join(b, cfg['pages'])) for b in base_dirs)] # ルートフォルダが全ドライブで見つからないモードがあれば、そのモードの全記録が消えるため中止
+    if missing_modes:
+        return {
+            "status": "error",
+            "message": f"以下のモードのルートフォルダが見つからないため中止しました: {missing_modes}"
         }
     valid_keys = set()
     for mode, config in modes_config.items():
@@ -713,9 +701,12 @@ def clean_orphaned_data(base_dirs, modes_config, tags_path, stats_path): # 無�
         save_tags(tags_path, cleaned_tags)
         
         with STATS_LOCK:
-            stats = load_stats(stats_path)
+            global _stats_dirty
+            stats = dict(_stats_cache) if _stats_cache else load_stats(stats_path) # メモリ上に最新の統計があればそちらを優先（未フラッシュ分を取りこぼさない）
             cleaned_stats, stats_removed = filter_data(stats)
             save_stats(stats_path, cleaned_stats)
+            _stats_cache.clear(); _stats_cache.update(cleaned_stats) # メモリキャッシュも掃除後の状態に同期し、後続の遅延フラッシュによる巻き戻りを防ぐ
+            _stats_dirty = False
             
         return {"status": "success", "tags_removed": tags_removed, "stats_removed": stats_removed}
     except Exception as e: return {"status": "error", "message": str(e)}

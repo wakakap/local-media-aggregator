@@ -18,6 +18,8 @@ let currentSubtitles = [], _cachedTagCounts = null, _lastTagsDataRef = null, _la
 let preloadObserver = null, readObserver = null, visibleRatios = {}, isJumping = false, jumpTimeout = null; // オブザーバーとスクロール制御
 let audioContext = null, analyser = null, dataArray = null, source = null, animationId = null, isVisualizerInited = false, stars = []; // ビジュアライザー変数
 const VISUALIZER_CONFIG = { barCount: 64, starCount: 50 }; // ビジュアライザー設定
+const scrollContainer = document.querySelector('.main-content') || document.scrollingElement; // ブラウズ画面のスクロール要素
+export function saveRootScroll() { if (scrollContainer) appState.rootScrollTop = scrollContainer.scrollTop; } // ROOT ビューのスクロール位置を保存
 export function showLoading(show) { loadingIndicator.style.display = show ? 'block' : 'none'; } // ローディング表示切替
 export function renderContent(data) { // 新しいデータセットを受け取り、原順序を記録してビューを初期化
     appState.currentDataSet = data;
@@ -35,6 +37,9 @@ export function renderCurrentView() { // 現在の状態を適用して描画（
     const items = isRootView ? applySortToItems(filterItemsByTags(base)) : base.slice(); // 深層目録は無加工でそのまま
     appState.currentDataSet.items = items; // クリック時の item 逆引き用に現在の可視リストを保持
     mediaContainer.innerHTML = '';
+    let pendingScrollRestore = isRootView && appState.restoreRootScroll; // ROOT 復帰時のみスクロール位置を復元（フラグは一度きり消費）
+    appState.restoreRootScroll = false;
+    if (scrollContainer) scrollContainer.scrollTop = 0; // 既定は最上部（作品ページはどの階層でも常にトップから）
     if (items.length === 0) {
         const msg = document.createElement('div'); msg.style.padding = '20px'; msg.style.color = '#888'; msg.textContent = '該当するアイテムがありません'; mediaContainer.appendChild(msg);
         viewerState.fileList = []; return;
@@ -46,6 +51,10 @@ export function renderCurrentView() { // 現在の状態を適用して描画（
         for (let i = currentIndex; i < end; i++) { mediaContainer.className === 'grid-view' ? renderCard(items[i], fragment) : renderFileRow(items[i], fragment); }
         mediaContainer.appendChild(fragment);
         currentIndex = end;
+        if (pendingScrollRestore && scrollContainer) { // コンテンツの高さが足りた時点で保存位置へ復元（各チャンク後に試行）
+            scrollContainer.scrollTop = appState.rootScrollTop;
+            if (scrollContainer.scrollTop >= appState.rootScrollTop - 1 || currentIndex >= items.length) pendingScrollRestore = false;
+        }
         if (currentIndex < items.length) requestAnimationFrame(renderChunk);
     }
     renderChunk();
@@ -111,7 +120,7 @@ function renderCard(item, targetElement = mediaContainer) { // グリッドカ�
     card.dataset.path = item.full_path; card.dataset.isDir = item.is_dir;
     nameEl.textContent = `${item.is_dir ? '📁' : (item.media_type === 'video' ? '🎬' : '📄')} ${item.name}`;
     if (item.thumbnail_filename) { img.src = `/api/media/${appState.mode}/thumbnail/${safeEncodePath(item.thumbnail_filename)}`; img.style.display = 'block'; }
-    else if (item.cover_filename) { img.src = item.cover_source === 'local' ? `/api/media/${appState.mode}/pages/${safeEncodePath(item.thumbnail_filename)}` : `/api/media/${appState.mode}/cover/${safeEncodePath(item.thumbnail_filename)}`; img.style.display = 'block'; }
+    else if (item.cover_filename) { img.src = item.cover_source === 'local' ? `/api/media/${appState.mode}/pages/${safeEncodePath(item.cover_filename)}` : `/api/media/${appState.mode}/cover/${safeEncodePath(item.cover_filename)}`; img.style.display = 'block'; } // 修正: この分岐では thumbnail_filename は空のため cover_filename を使う
     else { img.style.display = 'none'; clone.querySelector('.placeholder-text').textContent = item.name_no_ext; }
     renderTags(tagsEl, item);
     clone.querySelector('.card-image-wrapper').onclick = (e) => { e.stopPropagation(); handleItemClick(item); };
@@ -147,8 +156,14 @@ export function renderTags(container, item) { // タグの描画
         });
         const addBtn = document.createElement('span'); addBtn.className = 'add-tag-btn'; addBtn.textContent = '+';
         addBtn.onclick = (e) => {
-            e.stopPropagation(); const newTag = prompt(`"${item.name_no_ext}" に新しいタグを追加:`);
-            if(newTag) { if(!appState.tempTagsData[compositeKey]) appState.tempTagsData[compositeKey] = []; if (!appState.tempTagsData[compositeKey].includes(newTag)) { appState.tempTagsData[compositeKey].push(newTag); renderTags(container, item); } }
+            e.stopPropagation(); const input = prompt(`"${item.name_no_ext}" に新しいタグを追加 (カンマ区切りで複数可):`);
+            if(input) {
+                const newTags = input.split(/[,，、]/).map(t => t.trim()).filter(t => t); // カンマ区切りで複数タグを一括追加、前後の空白は自動除去
+                if(!appState.tempTagsData[compositeKey]) appState.tempTagsData[compositeKey] = [];
+                let changed = false;
+                newTags.forEach(tag => { if (!appState.tempTagsData[compositeKey].includes(tag)) { appState.tempTagsData[compositeKey].push(tag); changed = true; } });
+                if (changed) renderTags(container, item);
+            }
         };
         container.appendChild(addBtn);
     } else {
@@ -243,9 +258,26 @@ function recordImageView(index) { // 画像表示履歴記録
     const parts = item.media_path.split(/[/\\]/); parts.pop(); const galleryKey = parts.join('/');
     if (galleryKey) api.recordView(galleryKey, appState.mode, index);
 }
+let cancelAnchor = null; // 実行中のアンカー保持を解除する関数
+function anchorToImage(index, duration = 2500) { // 周辺画像の遅延ロードで発生するレイアウトシフトを補正し、対象画像へスクロール位置を固定し続ける
+    if (cancelAnchor) cancelAnchor();
+    const container = document.querySelector('.image-container'), targetImg = container.querySelector(`.viewer-img[data-index="${index}"]`); if (!targetImg) return;
+    let raf = null; const start = performance.now(); let lastShift = start;
+    const events = ['wheel', 'touchstart', 'pointerdown'];
+    const stop = () => { if (raf) cancelAnimationFrame(raf); raf = null; isJumping = false; events.forEach(ev => container.removeEventListener(ev, stop)); window.removeEventListener('keydown', stop); if (cancelAnchor === stop) cancelAnchor = null; };
+    events.forEach(ev => container.addEventListener(ev, stop, { passive: true })); window.addEventListener('keydown', stop); // ユーザー操作があれば即座に解除
+    cancelAnchor = stop; isJumping = true; // アンカー中は readObserver による誤ページの記録を抑止
+    const step = (now) => {
+        if (!container.contains(targetImg)) { stop(); return; }
+        if (Math.abs(container.scrollTop - targetImg.offsetTop) > 1) { container.scrollTop = targetImg.offsetTop; lastShift = now; }
+        if (now - start > duration || (now - start > 300 && now - lastShift > 400)) { stop(); return; } // レイアウトが安定したら（または上限時間で）解除
+        raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+}
 function jumpToImage(index) { // 指定画像へジャンプ
     const container = document.querySelector('.image-container'), targetImg = container.querySelector(`.viewer-img[data-index="${index}"]`); if (!targetImg) return;
-    const doScroll = () => { isJumping = true; clearTimeout(jumpTimeout); autoFitImage(index); targetImg.scrollIntoView({ block: 'start' }); jumpTimeout = setTimeout(() => { isJumping = false; }, 150); };
+    const doScroll = () => { clearTimeout(jumpTimeout); autoFitImage(index); anchorToImage(index); }; // 一回きりの scrollIntoView ではなくアンカー保持で位置ズレを防ぐ
     [index - 1, index, index + 1].forEach(i => { const img = container.querySelector(`.viewer-img[data-index="${i}"]`); if (img && !img.getAttribute('src')) img.src = img.dataset.src; });
     !targetImg.complete || !targetImg.naturalWidth ? targetImg.addEventListener('load', doScroll, { once: true }) : doScroll();
     updateProgressBar(index); recordImageView(index);
@@ -499,27 +531,44 @@ function createStatRow(node, maxViews, color) { // 統計行要素生成
     container.appendChild(histogramContainer); return container;
 }
 function renderHistogram(folderNode, container, mainColor) { // ヒストグラム描画
-    if (!folderNode.nodes || folderNode.nodes.length === 0) { container.innerHTML = '<span style="color:#666; margin:auto; font-size:11px;">詳細データなし</span>'; return; }
+    if (!folderNode.nodes || folderNode.nodes.length === 0) { // ページ/ファイル詳細が無いフォルダは、展開領域全体を「フォルダを開く」ボタンにする
+        container.innerHTML = '';
+        const btn = document.createElement('div');
+        btn.textContent = `\u{1F4C2} フォルダを開く: ${folderNode.name}`;
+        btn.style.cssText = 'margin:auto; width:100%; height:100%; display:flex; align-items:center; justify-content:center; font-size:11px; color:#aaa; cursor:pointer; border:1px dashed #444; border-radius:3px; box-sizing:border-box; transition:color 0.15s, border-color 0.15s;';
+        btn.onmouseenter = () => { btn.style.color = '#fff'; btn.style.borderColor = mainColor; };
+        btn.onmouseleave = () => { btn.style.color = '#aaa'; btn.style.borderColor = '#444'; };
+        btn.onclick = (e) => { e.stopPropagation(); jumpAndOpen({ type: 'folder', name: folderNode.name }, folderNode.full_path, folderNode.mode, folderNode.item_key); }; // 自身のパスへ移動（閲覧記録も通常ジャンプと同様に記録）
+        container.appendChild(btn); return;
+    }
     const sortedNodes = [...folderNode.nodes].sort((a, b) => (a.type === 'page' && b.type === 'page') ? (a.page_index || 0) - (b.page_index || 0) : a.name.localeCompare(b.name, undefined, {numeric: true, sensitivity: 'base'}));
     const maxItemViews = Math.max(...sortedNodes.map(p => p.views || 0)) || 1;
     sortedNodes.forEach(node => {
         const bar = document.createElement('div'); bar.style.flexGrow = 1; bar.style.height = `${Math.max((node.views / maxItemViews) * 100, 5)}%`; bar.style.backgroundColor = mainColor; bar.className = 'histogram-bar'; bar.title = `${node.name} : ${node.views} 回アクセス`;
         bar.onmouseenter = () => { bar.style.opacity = 1; bar.style.backgroundColor = '#fff'; }; bar.onmouseleave = () => { bar.style.opacity = 0.8; bar.style.backgroundColor = mainColor; };
-        bar.onclick = (e) => { e.stopPropagation(); jumpAndOpen(node, folderNode.full_path, folderNode.mode); }; container.appendChild(bar);
+        bar.onclick = (e) => { e.stopPropagation(); jumpAndOpen(node, folderNode.full_path, folderNode.mode, folderNode.item_key); }; container.appendChild(bar);
     });
 }
-async function jumpAndOpen(targetNode, parentPath, targetMode) { // アイテムへの直接移動
+async function jumpAndOpen(targetNode, parentPath, targetMode, itemKey = null) { // アイテムへの直接移動
     const statsView = document.getElementById('stats-view'), browseView = document.getElementById('browse-view');
     if (statsView.style.display !== 'none') { statsView.style.display = 'none'; browseView.style.display = 'block'; (!appState.inSearchMode && !appState.isRoot) ? document.getElementById('directory-header').style.display = 'flex' : document.getElementById('tag-filter-container').style.display = 'block'; }
     if (targetMode && targetMode !== appState.mode) { appState.mode = targetMode; const selector = document.getElementById('mode-selector'); if (selector) selector.value = targetMode; appState.selectedTags = []; appState.pathStack = []; }
     const targetPath = parentPath || targetNode.full_path || targetNode.path;
     if (!targetPath) { alert("エラー：対象パスを取得できず、移動できません。"); return; }
-    if (targetPath) {
+    if (itemKey) { // バックエンドが返した正確な統計キーを使い、階層ごとに記録（絶対パスからの再構築は深い構造で誤キーになるため廃止）
+        const segs = itemKey.split('/'); let rel = '';
+        segs.forEach(seg => { rel = rel ? rel + '/' + seg : seg; try { api.recordView(rel, appState.mode, null); } catch (e) {} });
+    } else { // 旧形式レスポンス向けフォールバック（従来のパス再構築）
         const validParts = targetPath.split(/[/\\]/).filter(p => p && !p.includes(':')); let currentRelPath = "";
         for (let i = Math.max(0, validParts.length - 3); i < validParts.length; i++) { if (validParts[i]) { if (validParts[i].toUpperCase().endsWith('_PAGES')) continue; currentRelPath = currentRelPath ? currentRelPath + '/' + validParts[i] : validParts[i]; try { api.recordView(currentRelPath.lastIndexOf('.') > 0 ? currentRelPath.substring(0, currentRelPath.lastIndexOf('.')) : currentRelPath, appState.mode, null); } catch (e) {} } }
     }
     try { await window.browsePathFunction(targetPath); } catch (e) { console.error("ロード失敗:", e); return; }
     if (targetNode.type === 'page') { const imagesList = viewerState.fileList.filter(f => f.media_type === 'image'); if (imagesList.length === 0) return; openImageViewer(imagesList[Math.min(Math.max(targetNode.page_index, 0), imagesList.length - 1)]); }
+    else if (targetNode.type === 'file') { // メディアのヒストグラムからのジャンプ: 目録止まりにせず該当ファイルを実際に開く
+        const found = (appState.currentDataSet && appState.currentDataSet.items || []).find(i => !i.is_dir && i.name === targetNode.name);
+        if (found) handleItemClick(found);
+        else alert(`対象ファイルが見つかりません: ${targetNode.name}`);
+    }
 }
 export async function openTextViewer(item) { // テキストリーダー起動
     const viewer = document.getElementById('text-viewer'), headerDiv = document.getElementById('text-reader-header'); showLoading(true); recordFileAccess(item);

@@ -18,7 +18,9 @@ export const appState = {
     sortMode: 'default', // カードの並び順 ('default' | 'name' | 'size')
     selectedTags: [],    // 正選タグ（左クリック）：全て含むカードのみ表示（AND）
     excludedTags: [],    // 反選タグ（右クリック）：いずれか含むカードを除外（OR）
-    keepFilterState: false // フォルダ遷移をまたいで並び順・タグ絞り込みを維持するフラグ
+    keepFilterState: false, // フォルダ遷移をまたいで並び順・タグ絞り込みを維持するフラグ
+    rootScrollTop: 0,       // ROOT ビューのスクロール位置（作品から復帰した際の復元用）
+    restoreRootScroll: false // 次回の ROOT 描画時にスクロール位置を復元するフラグ
 };
 
 export const playerState = {

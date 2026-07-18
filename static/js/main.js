@@ -13,6 +13,11 @@ document.addEventListener('DOMContentLoaded', async () => { // 初期化処理
     browsePath(new URLSearchParams(window.location.search).get('path') || ''); setupEventListeners();
 });
 async function browsePath(path, pushState = true) { // フォルダ閲覧処理
+    if (!path && appState.keepFilterState && appState.searchQuery) { // ROOT 復帰時、検索状態が残っていればタグ絞り込みと同様に検索結果ビューを復元
+        appState.keepFilterState = false;
+        performSearch(appState.searchQuery, appState.searchType || 'keyword');
+        return;
+    }
     const currentRenderId = ++appState.renderingId; ui.showLoading(true); appState.inSearchMode = false;
     if (!appState.keepFilterState) { appState.selectedTags = []; appState.excludedTags = []; appState.searchQuery = ''; appState.sortMode = 'default'; } // 明示的リセット以外は状態維持（作品往復・root 復帰でも保持）
     appState.keepFilterState = false; // フラグは一度きり
@@ -61,8 +66,8 @@ async function applyRootFilter() { // ROOT に対するタグ絞り込み・ソ�
 }
 function setupEventListeners() { // 全イベントリスナーの登録
     window.addEventListener('popstate', (e) => { if (e.state) { if (e.state.mode && e.state.mode !== appState.mode) { appState.mode = e.state.mode; document.getElementById('mode-selector').value = appState.mode; } browsePath(e.state.path, false); } else browsePath('', false); });
-    window.addEventListener('browse-path', (e) => { appState.keepFilterState = true; browsePath(e.detail, true); }); // 目録移動でも絞り込み状態を維持
-    window.addEventListener('browse-root', () => { appState.keepFilterState = true; browsePath(''); }); // root 復帰でも維持（明示リセットは reset-view で）
+    window.addEventListener('browse-path', (e) => { if (appState.isRoot || appState.inSearchMode) ui.saveRootScroll(); appState.keepFilterState = true; browsePath(e.detail, true); }); // 目録移動でも絞り込み状態を維持（ROOT から離れる時はスクロール位置を保存）
+    window.addEventListener('browse-root', () => { appState.keepFilterState = true; appState.restoreRootScroll = true; browsePath(''); }); // root 復帰でも維持し、スクロール位置も復元（明示リセットは reset-view で）
     window.addEventListener('go-back', () => { appState.keepFilterState = true; browsePath(appState.currentPath.split(/[\\/]/).slice(0, -1).join('/'), true); });
     window.addEventListener('refresh-view', () => { appState.keepFilterState = true; browsePath(appState.currentPath); });
     window.addEventListener('toggle-tag', (e) => { // タグクリック：左=正選(検索性) / 右=反選。常に ROOT に対する絞り込みとして扱う

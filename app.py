@@ -46,7 +46,10 @@ def get_mode_cache(mode): # キャッシュの取得と更新確認
             return data
     except: return None
 def get_paths_for_mode(mode): # 対象モードのパスリスト取得
-    config = MODES_CONFIG.get(mode.upper(), MODES_CONFIG['MUSIC'])
+    config = MODES_CONFIG.get(mode.upper())
+    if config is None: # 未知モードは config.json の先頭モードにフォールバック、modes 自体が空なら明示的にエラー
+        if not MODES_CONFIG: raise RuntimeError("config.json の modes が空です。設定を確認してください。")
+        config = next(iter(MODES_CONFIG.values()))
     return [os.path.join(base, config['pages']) for base in BASE_DIRS], [os.path.join(base, config['cover']) for base in BASE_DIRS]
 def is_safe_path(base_roots, req): # リクエストパスの安全性確認
     req_real = os.path.realpath(req).lower()
@@ -138,15 +141,9 @@ def api_search(): # 検索API
                     items.append(item)
         is_rebuilding = CACHE_BUILD_LOCKS[mode].locked() if mode in CACHE_BUILD_LOCKS else False
         return jsonify({"items": sorted(items, key=lambda x: logic.natural_sort_key(x['name'])), "source": "cache", "is_rebuilding": is_rebuilding})
-    root_paths, cover_paths = get_paths_for_mode(mode) 
-    for i, root_path in enumerate(root_paths):
-        if not os.path.exists(root_path): continue
-        cover_path = cover_paths[i]
-        drive_items = logic.search_by_tag(root_path, cover_path, all_tags, cover_map, [t.strip() for t in query.split(',') if t.strip()], mode) if search_type == 'tag' else logic.search_all(root_path, cover_path, all_tags, cover_map, query, mode)
-        if isinstance(drive_items, list): items.extend(drive_items)
-    items = attach_live_tags(items, mode) 
+    # 検索はキャッシュ専用。キャッシュ未構築の場合はディスクをスキャンせず「見つからない」として空を返す
     is_rebuilding = CACHE_BUILD_LOCKS[mode].locked() if mode in CACHE_BUILD_LOCKS else False
-    return jsonify({"items": sorted(items, key=lambda x: logic.natural_sort_key(x['name'])), "source": "disk", "is_rebuilding": is_rebuilding})
+    return jsonify({"items": [], "source": "cache", "is_rebuilding": is_rebuilding})
 
 @app.route('/api/update_cache', methods=['POST'])
 def api_update_cache(): # キャッシュの更新
@@ -317,4 +314,4 @@ def api_dokidoki_file(filepath): # ドキドキモード専用のファイルス
         if os.path.exists(target): return send_from_directory(os.path.dirname(target), os.path.basename(target))
     abort(404)
 
-if __name__ == '__main__': app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=True)
+if __name__ == '__main__': app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)

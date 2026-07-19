@@ -32,6 +32,11 @@ app = Flask(__name__)
 CORS(app)
 app.config['JSON_AS_ASCII'] = False
 
+import logging
+class _StatusLogFilter(logging.Filter): # /api/status のポーリングはアクセスログから除外 (3秒毎の無意味な行でコンソールが埋まるのを防ぐ)
+    def filter(self, record): return "/api/status" not in record.getMessage()
+logging.getLogger("werkzeug").addFilter(_StatusLogFilter())
+
 all_tags = logic.load_tags(TAGS_FILE_PATH)
 cover_map = logic.load_cover_map(MAP_FILE_PATH)
 TAGS_LOCK = threading.Lock()
@@ -71,8 +76,15 @@ def attach_live_tags(items, mode): # メモリ内の最新タグをアイテム�
     return items
 def attach_backup_status(items, mode): # バックアップ完了状態をアイテムに動的注入 (キャッシュ自体は書き換えない = 再構築で消えない)
     done = backup_manager.get_done_keys()
+    prefix = f"{mode.upper()}:"
     for item in items:
-        item['backed_up'] = f"{mode.upper()}:{item.get('media_path', '')}" in done # ファイルは拡張子付きキーで管理 (タグの合成キーとは別規則)
+        mp = item.get('media_path', '')
+        backed = (prefix + mp) in done # ファイルは拡張子付きキーで管理 (タグの合成キーとは別規則)
+        if not backed and '/' in mp: # 祖先フォルダが丸ごとバックアップ済みなら、その配下 (タグ検索で出る深層カード) も完了扱いにする
+            parts = mp.split('/')
+            for i in range(len(parts) - 1, 0, -1):
+                if (prefix + '/'.join(parts[:i])) in done: backed = True; break
+        item['backed_up'] = backed
     return items
 
 @app.route('/api/settings')

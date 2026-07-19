@@ -419,7 +419,7 @@ function applyDotState(dot) { // ランプ1個の色を現在の状態から決�
     const t = (appState.liveBackups || {})[dot.dataset.key];
     dot.classList.remove('queued', 'uploading', 'done', 'error');
     dot.title = '未バックアップ';
-    if (t && (t.state === 'queued' || t.state === 'uploading')) { dot.classList.add(t.state); dot.title = t.state === 'queued' ? 'バックアップ待機中' : 'アップロード中…'; }
+    if (t && (t.state === 'queued' || t.state === 'uploading')) { dot.classList.add(t.state); dot.title = t.state === 'queued' ? 'バックアップ待機中' : ('アップロード中… ' + (t.message || '')); }
     else if (t && t.state === 'error') { dot.classList.add('error'); dot.title = 'バックアップ失敗: ' + (t.message || '不明なエラー'); }
     else if ((t && t.state === 'done') || dot.dataset.done === '1') { dot.dataset.done = '1'; dot.classList.add('done'); dot.title = 'バックアップ完了'; }
 }

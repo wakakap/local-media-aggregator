@@ -51,11 +51,7 @@ def local_to_remote(full_path, base_dirs, cfg): # ローカル絶対パス → �
     rel = os.path.relpath(abs_path, matched_root).replace(os.sep, "/")
     for kw in cfg.get("exclude_keywords", ["THUMBNAILS"]): # サムネイル等はバックアップ対象外
         if f"/{kw}/" in f"/{rel}/": return None, f"除外キーワード '{kw}' を含むため対象外"
-    matched_folder = None
-    for folder in cfg.get("upload_list", []): # アップロード白名单に属するか判定
-        folder_posix = folder.replace("\\", "/")
-        if rel == folder_posix or rel.startswith(folder_posix + "/"): matched_folder = folder_posix; break
-    if matched_folder is None: return None, "UPLOAD_LIST 白名单の対象外パスです"
+    # 【v3】upload_list 白名单は廃止。バックアップ対象の管理は UI (backup_manager) 側に移行した。
     return cfg.get("remote_name", "").rstrip("/") + "/" + rel, None
 
 def remote_exists(remote_full, cfg): # クラウド側の存在確認 → 'exists' / 'missing' / (None=確認失敗, エラー文)

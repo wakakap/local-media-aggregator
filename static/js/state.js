@@ -20,7 +20,8 @@ export const appState = {
     excludedTags: [],    // 反選タグ（右クリック）：いずれか含むカードを除外（OR）
     keepFilterState: false, // フォルダ遷移をまたいで並び順・タグ絞り込みを維持するフラグ
     rootScrollTop: 0,       // ROOT ビューのスクロール位置（作品から復帰した際の復元用）
-    restoreRootScroll: false // 次回の ROOT 描画時にスクロール位置を復元するフラグ
+    restoreRootScroll: false, // 次回の ROOT 描画時にスクロール位置を復元するフラグ
+    liveBackups: {}          // 実行中/待機中/直近終了のバックアップタスク（/api/status のポーリング結果）
 };
 
 export const playerState = {

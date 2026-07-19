@@ -125,10 +125,16 @@ function renderCard(item, targetElement = mediaContainer) { // グリッドカ�
     renderTags(tagsEl, item);
     clone.querySelector('.card-image-wrapper').onclick = (e) => { e.stopPropagation(); handleItemClick(item); };
     card.ondblclick = () => { if (appState.isTagEditMode) enableRename(card, item, nameEl); };
+    const bkBtn = document.createElement('span'); bkBtn.className = 'card-backup-btn'; bkBtn.textContent = '☁'; bkBtn.title = 'クラウドへバックアップ'; // 編集モード時のみCSSで表示 (×の左隣)
+    bkBtn.onclick = (e) => { e.stopPropagation(); handleBackupItem(item); };
+    card.appendChild(bkBtn);
     const delBtn = document.createElement('span'); delBtn.className = 'card-delete-btn'; delBtn.textContent = '×'; delBtn.title = '削除'; // 編集モード時のみCSSで表示
     delBtn.onclick = (e) => { e.stopPropagation(); handleDeleteItem(item, card); };
     card.appendChild(delBtn);
     if (item.is_dir && item.total_size) { const sizeBadge = document.createElement('span'); sizeBadge.className = 'card-size-badge'; sizeBadge.textContent = formatBytes(item.total_size); card.appendChild(sizeBadge); } // 最外層作品フォルダの総体積を左上に表示
+    const dot = document.createElement('span'); dot.className = 'card-backup-dot'; dot.dataset.key = `${appState.mode}:${item.media_path}`; // 体積表示の右隣: バックアップ状態ランプ (灰=未 / 黄=実行中 / 緑=完了)
+    if (item.backed_up) dot.dataset.done = '1';
+    card.appendChild(dot); applyDotState(dot);
     targetElement.appendChild(clone);
 }
 function renderFileRow(item, targetElement = mediaContainer) { // リスト行の描画
@@ -384,7 +390,7 @@ function enableRename(card, item, nameEl) { // インラインリネームUI (�
     input.onblur = save; 
     input.onkeydown = (e) => { if(e.key === 'Enter') { e.preventDefault(); input.blur(); } };
 }
-function showConfirmDialog(message, swapButtons) { // カスタム確認ダイアログ (2回目はボタン位置を左右入替して誤操作防止)
+function showConfirmDialog(message, swapButtons, okText = '削除する', okColor = '#c62828') { // カスタム確認ダイアログ (2回目はボタン位置を左右入替して誤操作防止)
     return new Promise(resolve => {
         const overlay = document.createElement('div');
         overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:5000; display:flex; justify-content:center; align-items:center;';
@@ -392,7 +398,7 @@ function showConfirmDialog(message, swapButtons) { // カスタム確認ダイ�
         box.style.cssText = 'background:#2a2a2a; border:1px solid #555; border-radius:8px; padding:20px 25px; max-width:420px; color:#fff; box-shadow:0 4px 20px rgba(0,0,0,0.8);';
         const msg = document.createElement('div'); msg.style.cssText = 'margin-bottom:18px; font-size:14px; line-height:1.6; white-space:pre-wrap; word-break:break-all;'; msg.textContent = message;
         const btnRow = document.createElement('div'); btnRow.style.cssText = 'display:flex; gap:12px; justify-content:flex-end;';
-        const okBtn = document.createElement('button'); okBtn.className = 'button'; okBtn.textContent = '削除する'; okBtn.style.cssText = 'background-color:#c62828; border:none;';
+        const okBtn = document.createElement('button'); okBtn.className = 'button'; okBtn.textContent = okText; okBtn.style.cssText = `background-color:${okColor}; border:none;`;
         const cancelBtn = document.createElement('button'); cancelBtn.className = 'button'; cancelBtn.textContent = 'キャンセル';
         const close = (v) => { overlay.remove(); resolve(v); };
         okBtn.onclick = () => close(true); cancelBtn.onclick = () => close(false);
@@ -409,9 +415,34 @@ export function notifyRcloneResult(r) { // クラウド同期結果の通知
     else if (r.status === 'check_failed') alert('⚠️ クラウド側の存在確認に失敗しました: ' + (r.message || '') + '\n安全のためクラウド操作は行っていません。rclone の認証状態を確認してください。');
     else console.log('☁️ クラウド同期完了:', r);
 }
-async function handleDeleteItem(item, elem) { // 削除処理 (二重確認 → ローカル削除 → クラウド同期)
+function applyDotState(dot) { // ランプ1個の色を現在の状態から決定 (優先度: 実行中タスク > 永続完了記録)
+    const t = (appState.liveBackups || {})[dot.dataset.key];
+    dot.classList.remove('queued', 'uploading', 'done', 'error');
+    dot.title = '未バックアップ';
+    if (t && (t.state === 'queued' || t.state === 'uploading')) { dot.classList.add(t.state); dot.title = t.state === 'queued' ? 'バックアップ待機中' : 'アップロード中…'; }
+    else if (t && t.state === 'error') { dot.classList.add('error'); dot.title = 'バックアップ失敗: ' + (t.message || '不明なエラー'); }
+    else if ((t && t.state === 'done') || dot.dataset.done === '1') { dot.dataset.done = '1'; dot.classList.add('done'); dot.title = 'バックアップ完了'; }
+}
+export function updateBackupDots() { document.querySelectorAll('.card-backup-dot').forEach(applyDotState); } // 全カードのランプを再着色 (ポーリング応答時に呼ばれる)
+async function handleBackupItem(item) { // ☁ボタン: 作品単位のバックアップをキューへ投入 (非同期・多重投入可)
+    if (appState.pendingRenames && Object.keys(appState.pendingRenames).some(p => p === (item.original_full_path || item.full_path))) { alert('この作品には未保存のリネームがあります。\n先に「タグを保存」してからバックアップしてください。'); return; }
+    const key = `${appState.mode}:${item.media_path}`;
+    const t = (appState.liveBackups || {})[key];
+    if (t && (t.state === 'queued' || t.state === 'uploading')) { alert('この作品は既にバックアップ待機中/実行中です'); return; }
+    const sizeInfo = item.total_size ? `\n体積: ${formatBytes(item.total_size)}` : '';
+    if (!await showConfirmDialog(`「${item.name}」をクラウドへバックアップしますか？${sizeInfo}\n※バックアップ中も通常の閲覧・操作は可能です`, false, '備份開始', '#2e7d32')) return;
+    const res = await api.backupItem(appState.mode, item.original_full_path || item.full_path);
+    if (res.status === 'queued' || res.status === 'already') {
+        appState.liveBackups[res.key || key] = { state: 'queued', message: '' };
+        updateBackupDots();
+        window.dispatchEvent(new CustomEvent('ensure-status-polling')); // ポーリング開始 → 完了時にランプが自動で緑になる
+    } else alert('バックアップ開始に失敗: ' + (res.message || res.error || '不明なエラー'));
+}
+async function handleDeleteItem(item, elem) { // 削除処理 (二重確認 → 実行中バックアップの中止 → ローカル削除 → クラウド同期)
     const kind = item.is_dir ? 'フォルダ' : 'ファイル';
-    if (!await showConfirmDialog(`${kind}「${item.name}」を削除しますか？\n※ローカルディスクから削除されます`, false)) return;
+    const liveTask = (appState.liveBackups || {})[`${appState.mode}:${item.media_path}`];
+    const backupWarn = (liveTask && (liveTask.state === 'queued' || liveTask.state === 'uploading')) ? '\n⚠️ この作品は現在バックアップ中です。削除すると転送は中止されます。' : '';
+    if (!await showConfirmDialog(`${kind}「${item.name}」を削除しますか？\n※ローカルディスクから削除されます${backupWarn}`, false)) return;
     if (!await showConfirmDialog(`⚠️ 最終確認：本当に削除してよろしいですか？`, true)) return; // 2回目はボタン位置入替
     const targetPath = item.original_full_path || item.full_path; // 未保存リネームがある場合、ディスク上はまだ旧名のため元パスで削除
     if (appState.pendingRenames) delete appState.pendingRenames[targetPath]; // 削除するものの未保存リネームは破棄
@@ -424,6 +455,8 @@ async function handleDeleteItem(item, elem) { // 削除処理 (二重確認 → 
         viewerState.fileList = viewerState.fileList.filter(i => i !== item); // ビューアのインデックスずれ防止
         const compositeKey = `${appState.mode}:${item.is_dir ? item.media_path : item.media_path.replace(/\.[^/.]+$/, "")}`;
         if (appState.pendingDeletes) appState.pendingDeletes.push(compositeKey); // タグ破棄はディスク削除時に即時反映せず、保存時にまとめて処理（削除直後に同名フォルダを補充する運用に対応）
+        delete appState.liveBackups[`${appState.mode}:${item.media_path}`]; // ランプ用タスク情報も掃除
+        if (res.backup_canceled) console.log('☁ 実行中だったバックアップを中止しました:', item.name);
         notifyRcloneResult(res.rclone);
     } else alert('削除失敗: ' + (res.message || res.error || '不明なエラー'));
 }
@@ -769,6 +802,13 @@ export function renderTelemetry() { // Telemetry Dashboard
     badgeEdit.style.display = appState.isTagEditMode ? 'block' : 'none';
     // 2. キャッシュ構築中の表示/非表示
     badgeRebuild.style.display = appState.isRebuilding ? 'block' : 'none';
+    // 2.5 バックアップ実行中バッジ (実行中+待機中の件数)
+    const badgeBackup = document.getElementById('badge-backup');
+    if (badgeBackup) {
+        const activeCount = Object.values(appState.liveBackups || {}).filter(t => t.state === 'queued' || t.state === 'uploading').length;
+        badgeBackup.style.display = activeCount > 0 ? 'block' : 'none';
+        badgeBackup.textContent = `☁ 備份中 ×${activeCount}`;
+    }
     // 3. データソースの切り替え
     if (appState.currentSource) {
         badgeSource.style.display = 'block';

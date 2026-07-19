@@ -3,6 +3,7 @@ from flask import Flask, jsonify, render_template, request, send_from_directory,
 from flask_cors import CORS
 import backend_logic as logic
 import rclone_sync as rsync
+import backup_manager
 import threading
 CACHE_BUILD_LOCKS = {}
 
@@ -18,6 +19,8 @@ DATA_DIR = SYSTEM_CONFIG.get("system_data_dir", "./data")
 TAGS_FILE_PATH, MAP_FILE_PATH = os.path.join(DATA_DIR, "tags.json"), os.path.join(DATA_DIR, "map.txt")
 STATS_FILE_PATH, MUSIC_RATINGS_PATH = os.path.join(DATA_DIR, "stats.json"), os.path.join(DATA_DIR, "music_ratings.json")
 RCLONE_CONFIG = SYSTEM_CONFIG.get("rclone", {"enabled": False}) # rclone クラウド同期設定
+os.makedirs(DATA_DIR, exist_ok=True)
+backup_manager.init(DATA_DIR) # バックアップ完了記録 (backup_status.json) をロード
 USE_RECYCLE_BIN = SYSTEM_CONFIG.get("use_recycle_bin", True)# 削除時にゴミ箱へ移動するか
 
 
@@ -66,6 +69,11 @@ def attach_live_tags(items, mode): # メモリ内の最新タグをアイテム�
         composite_key = f"{mode.upper()}:{media_path_no_ext}"
         item['tags'] = all_tags.get(composite_key, [])
     return items
+def attach_backup_status(items, mode): # バックアップ完了状態をアイテムに動的注入 (キャッシュ自体は書き換えない = 再構築で消えない)
+    done = backup_manager.get_done_keys()
+    for item in items:
+        item['backed_up'] = f"{mode.upper()}:{item.get('media_path', '')}" in done # ファイルは拡張子付きキーで管理 (タグの合成キーとは別規則)
+    return items
 
 @app.route('/api/settings')
 def api_settings(): return jsonify({"modes": SYSTEM_CONFIG.get("modes", [])}) # 設定情報をフロントエンドに送信
@@ -112,7 +120,7 @@ def api_browse(): # フォルダ内容のブラウズ処理
         else:
             items = logic.get_directory_items(req_path, active_root, active_cover, all_tags, cover_map, mode)
             metadata = logic.get_directory_metadata(req_path, active_root, active_cover, all_tags, cover_map, mode)
-    items = attach_live_tags(items, mode) 
+    items = attach_backup_status(attach_live_tags(items, mode), mode)
     # スレッドロックの状態を確認し、再構築中か判定
     is_rebuilding = CACHE_BUILD_LOCKS[mode].locked() if mode in CACHE_BUILD_LOCKS else False
     return jsonify({"current_path": req_path, "is_root": is_root, "items": items, "metadata": metadata, "breadcrumbs": breadcrumbs, "source": source_type, "is_rebuilding": is_rebuilding})
@@ -140,7 +148,7 @@ def api_search(): # 検索API
                     item['tags'] = current_tags
                     items.append(item)
         is_rebuilding = CACHE_BUILD_LOCKS[mode].locked() if mode in CACHE_BUILD_LOCKS else False
-        return jsonify({"items": sorted(items, key=lambda x: logic.natural_sort_key(x['name'])), "source": "cache", "is_rebuilding": is_rebuilding})
+        return jsonify({"items": sorted(attach_backup_status(items, mode), key=lambda x: logic.natural_sort_key(x['name'])), "source": "cache", "is_rebuilding": is_rebuilding})
     # 検索はキャッシュ専用。キャッシュ未構築の場合はディスクをスキャンせず「見つからない」として空を返す
     is_rebuilding = CACHE_BUILD_LOCKS[mode].locked() if mode in CACHE_BUILD_LOCKS else False
     return jsonify({"items": [], "source": "cache", "is_rebuilding": is_rebuilding})
@@ -188,6 +196,7 @@ def api_batch_edit(): # 一括編集（タグ保存とリネームのトラン�
                 if not is_same_file_case_change and os.path.exists(new_path):
                     rename_failures.append({"path": old_path, "reason": "target_exists"}); continue
                 try:
+                    backup_manager.cancel_under(old_path) # 【競合対策】バックアップ中の作品をリネームする場合、先に rclone を止めてハンドル競合を防ぐ
                     os.rename(old_path, new_path)
                     executed_renames.append((old_path, new_path))
                 except Exception as e:
@@ -214,6 +223,12 @@ def api_batch_edit(): # 一括編集（タグ保存とリネームのトラン�
             except Exception as e:
                 r = {"status": "error", "message": str(e)}
             if r.get("status") != "disabled": rclone_report.append({"name": os.path.basename(new_p), **r})
+            idx = get_active_index(root_paths, new_p) # バックアップ完了記録のキー整合
+            if idx != -1:
+                old_rel = os.path.relpath(old_p, root_paths[idx]).replace('\\', '/')
+                new_rel = os.path.relpath(new_p, root_paths[idx]).replace('\\', '/')
+                if r.get("status") == "moved": backup_manager.migrate_status(mode, old_rel, new_rel) # クラウド側も移動済み → 緑を引き継ぐ
+                elif r.get("status") != "disabled": backup_manager.drop_status(mode, old_rel) # 移動できなかった/未バックアップ → 灰に戻して再バックアップを促す
         return jsonify({"status": "success", "rclone_report": rclone_report, "rename_failures": rename_failures})
     
     except Exception as e:
@@ -247,18 +262,21 @@ def api_delete_item(): # アイテムの物理削除 (ローカル削除 + タ�
     active_idx = get_active_index(root_paths, full_path)
     if active_idx == -1 or not os.path.exists(full_path): return jsonify({"status": "error", "message": "Path not found"}), 404
     is_dir = os.path.isdir(full_path) # 削除前に種別を確定 (削除後は判定不能になるため)
+    media_rel = os.path.relpath(full_path, root_paths[active_idx]).replace('\\', '/') # ステータスキー用の相対パスも削除前に確定
+    backup_canceled = backup_manager.cancel_under(full_path) # 【競合対策】この作品のバックアップが実行中/待機中なら中止し、rclone プロセスの終了を待ってからローカル削除へ進む
     global all_tags
     with TAGS_LOCK:
         res = logic.delete_file_only(full_path, USE_RECYCLE_BIN)
         if res['status'] != 'success': return jsonify(res), 500
         cache_res = logic.remove_item_from_cache(mode, full_path, DATA_DIR) # キャッシュから即時除去(タグは残す)
         if cache_res['status'] == 'error': print(f"Cache patch error ({mode}): {cache_res['message']}")
+    backup_manager.drop_status(mode, media_rel) # 完了記録も破棄 (残っているとゾンビの緑ランプになる)
     try:
-        rclone_result = rsync.sync_delete(full_path, is_dir, BASE_DIRS, RCLONE_CONFIG) # ロック外でクラウド同期
+        rclone_result = rsync.sync_delete(full_path, is_dir, BASE_DIRS, RCLONE_CONFIG) # ロック外でクラウド同期。中止されたバックアップの断片がクラウドに残っていても、ここで purge され一掃される
     except Exception as e: # ローカル削除は完了済みのため、同期失敗で 500 を返さない (二重の保険)
         import traceback; print(f"Rclone sync error: {traceback.format_exc()}")
         rclone_result = {"status": "error", "message": str(e)}
-    return jsonify({"status": "success", "rclone": rclone_result})
+    return jsonify({"status": "success", "rclone": rclone_result, "backup_canceled": backup_canceled})
 
 @app.route('/api/open_folder')
 def api_open_folder(): # ローカルフォルダを開く
@@ -293,19 +311,42 @@ def api_clean_data(): # 無効なデータのクリーンアップ
         res = logic.clean_orphaned_data(BASE_DIRS, MODES_CONFIG, TAGS_FILE_PATH, STATS_FILE_PATH)
         if res.get('status') == 'success': all_tags = logic.load_tags(TAGS_FILE_PATH)
     return jsonify(res)
+@app.route('/api/backup_item', methods=['POST'])
+def api_backup_item(): # 作品単位のクラウドバックアップをキューへ投入 (非同期実行、即時 return)
+    data = request.get_json()
+    mode, full_path = data['mode'], data['full_path']
+    if not RCLONE_CONFIG.get('enabled', False): return jsonify({"status": "error", "message": "rclone 同期が config で無効になっています"}), 400
+    root_paths, _cover = get_paths_for_mode(mode)
+    if not is_safe_path(root_paths, full_path): return jsonify({"status": "error", "message": "Access Denied"}), 403
+    active_idx = get_active_index(root_paths, full_path)
+    if active_idx == -1 or not os.path.exists(full_path): return jsonify({"status": "error", "message": "Path not found"}), 404
+    media_rel = os.path.relpath(full_path, root_paths[active_idx]).replace('\\', '/')
+    key = f"{mode.upper()}:{media_rel}"
+    res = backup_manager.enqueue(key, full_path, os.path.isdir(full_path), BASE_DIRS, RCLONE_CONFIG)
+    return jsonify({**res, "key": key})
+
+@app.route('/api/status')
+def api_status(): # 軽量ステータス (フロントのポーリング用): キャッシュ再構築状態 + バックアップタスク状態
+    mode = request.args.get('mode', '') # CACHE_BUILD_LOCKS はフロントから渡る生の mode 文字列がキー (browse/search と同一規則)
+    is_rebuilding = CACHE_BUILD_LOCKS[mode].locked() if mode in CACHE_BUILD_LOCKS else False
+    return jsonify({"is_rebuilding": is_rebuilding, "backups": backup_manager.get_live_tasks(), "backup_active": backup_manager.has_active()})
+
 @app.route('/api/dokidoki_media')
-def api_dokidoki_media(): # ドキドキモードのメディアリスト一括取得
+def api_dokidoki_media(): # ドキドキモードのメディアリスト一括取得 (dokidoki_dirs 配下を全深度で再帰走査)
     dirs, media = SYSTEM_CONFIG.get("dokidoki_dirs", []), []
     valid_exts = logic.IMAGE_EXTENSIONS | logic.VIDEO_EXTENSIONS
     for d in dirs:
         for base in BASE_DIRS:
             full_path = os.path.join(base, d)
-            if os.path.isdir(full_path):
-                try:
-                    for f in os.listdir(full_path):
+            if not os.path.isdir(full_path): continue
+            try:
+                for root, _subdirs, files in os.walk(full_path):
+                    for f in files:
                         ext = os.path.splitext(f)[1].lower()
-                        if ext in valid_exts: media.append({"path": f"{d}/{f}", "type": "video" if ext in logic.VIDEO_EXTENSIONS else "image"})
-                except: pass
+                        if ext not in valid_exts: continue
+                        rel = os.path.relpath(os.path.join(root, f), base).replace('\\', '/')
+                        media.append({"path": rel, "type": "video" if ext in logic.VIDEO_EXTENSIONS else "image"})
+            except Exception as e: print(f"[dokidoki] 走査エラー ({full_path}): {e}")
     return jsonify({"items": media})
 @app.route('/api/dokidoki_file/<path:filepath>')
 def api_dokidoki_file(filepath): # ドキドキモード専用のファイルストリーム配信

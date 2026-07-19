@@ -130,3 +130,14 @@ input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
 .row-delete-btn { display: none; margin-left: 10px; width: 18px; height: 18px; line-height: 17px; text-align: center; font-size: 13px; color: #fff; background-color: rgba(198, 40, 40, 0.9); border-radius: 50%; cursor: pointer; flex-shrink: 0; user-select: none; } /* リスト行右側の削除ボタン */
 .row-delete-btn:hover { background-color: #ff1744; }
 body.tag-edit-mode .card-delete-btn, body.tag-edit-mode .row-delete-btn { display: block; }
+/* ===== クラウドバックアップ UI (v1) ===== */
+.card-backup-dot { position: absolute; top: 6px; left: 4px; z-index: 3; width: 10px; height: 10px; border-radius: 50%; background-color: #777; border: 1px solid rgba(0,0,0,0.5); pointer-events: auto; } /* 体積表示の左のバックアップ状態ランプ: 既定=灰(未バックアップ) */
+.card .card-size-badge { left: 20px; } /* ランプの分だけ体積表示を右へずらす */
+.card-backup-dot.done { background-color: #4CAF50; box-shadow: 0 0 4px rgba(76,175,80,0.9); } /* 緑=完了 */
+.card-backup-dot.queued { background-color: #ffcc00; } /* 黄=待機中 */
+.card-backup-dot.uploading { background-color: #ffcc00; animation: backup-pulse 1s infinite alternate; } /* 黄点滅=転送中 */
+.card-backup-dot.error { background-color: #f44336; box-shadow: 0 0 4px rgba(244,67,54,0.9); } /* 赤=失敗 (title にエラー詳細) */
+@keyframes backup-pulse { from { opacity: 0.35; } to { opacity: 1; } }
+.card-backup-btn { display: none; position: absolute; top: 4px; right: 26px; z-index: 3; width: 18px; height: 18px; line-height: 17px; text-align: center; font-size: 12px; color: #fff; background-color: rgba(25, 118, 210, 0.9); border-radius: 50%; cursor: pointer; user-select: none; } /* ×の左隣のバックアップボタン (編集モード時のみ表示) */
+.card-backup-btn:hover { background-color: #2196f3; transform: scale(1.15); }
+body.tag-edit-mode .card-backup-btn { display: block; }

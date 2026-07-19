@@ -24,9 +24,30 @@ async function browsePath(path, pushState = true) { // フォルダ閲覧処理
     ui.renderTagFilter();
     try {
         const data = await api.browse(appState.mode, path || ''); if (currentRenderId !== appState.renderingId) { console.log("期限切れの browse リクエストを無視します"); return; }
-        if (!data.error) { appState.currentPath = data.current_path; appState.isRoot = data.is_root; appState.currentSource = data.source; appState.isRebuilding = data.is_rebuilding; ui.renderTelemetry();if (pushState) { const url = new URL(window.location); url.searchParams.set('mode', appState.mode); url.searchParams.set('path', path || ''); window.history.pushState({ path: path || '', mode: appState.mode }, '', url); } ui.renderContent(data); }
+        if (!data.error) { appState.currentPath = data.current_path; appState.isRoot = data.is_root; appState.currentSource = data.source; appState.isRebuilding = data.is_rebuilding; ui.renderTelemetry(); if (data.is_rebuilding) ensureStatusPolling();if (pushState) { const url = new URL(window.location); url.searchParams.set('mode', appState.mode); url.searchParams.set('path', path || ''); window.history.pushState({ path: path || '', mode: appState.mode }, '', url); } ui.renderContent(data); }
         else alert("読み込み失敗: " + data.error);
     } catch (e) { console.error(e); } finally { if (currentRenderId === appState.renderingId) ui.showLoading(false); }
+}
+let statusPollTimer = null; // /api/status ポーリング制御
+function ensureStatusPolling() { // 再構築中 or バックアップ実行中の間だけ 3 秒間隔でポーリング (アイドル時は完全停止)
+    if (statusPollTimer) return;
+    const tick = async () => {
+        try {
+            const s = await api.getStatus(appState.mode);
+            if (s && !s.error) {
+                const wasRebuilding = appState.isRebuilding;
+                appState.isRebuilding = !!s.is_rebuilding;
+                appState.liveBackups = s.backups || {};
+                ui.renderTelemetry(); // 【バグ修正】従来この徽章は次の browse/search 応答でしか更新されず、手動リフレッシュまで「再構築中」のまま残っていた
+                ui.updateBackupDots();
+                if (wasRebuilding && !appState.isRebuilding) { appState.currentSource = 'cache'; ui.renderTelemetry(); } // 再構築完了 → ソース表示も即時に緑の Cache へ
+                const stillActive = appState.isRebuilding || s.backup_active;
+                if (!stillActive) { clearInterval(statusPollTimer); statusPollTimer = null; }
+            }
+        } catch (e) { console.error('status poll error:', e); }
+    };
+    statusPollTimer = setInterval(tick, 3000);
+    tick(); // 初回は即時実行
 }
 function updateEditButtonUI() { // タグ編集UI更新
     const btn = document.getElementById('edit-tags-btn'), menu = document.getElementById('maintenance-menu');
@@ -83,6 +104,7 @@ function setupEventListeners() { // 全イベントリスナーの登録
     });
     window.addEventListener('tag-controls-changed', () => applyRootFilter()); // ソート切替も ROOT ビューに対して適用
     window.addEventListener('reset-view', () => resetView()); // default / 重置ボタン共通のリセット処理
+    window.addEventListener('ensure-status-polling', () => ensureStatusPolling()); // ☁ボタン等からのポーリング開始要求
     document.getElementById('open-local-folder-btn').onclick = async () => { if (!appState.currentPath || appState.currentPath === 'SEARCH') { alert("現在、ローカルフォルダを特定できません"); return; } const res = await api.openFolder(appState.currentPath); if (res.status !== 'success') alert("フォルダを開けません: " + (res.message || "不明なエラー")); };
     document.getElementById('mode-selector').addEventListener('change', (e) => { appState.mode = e.target.value; appState.selectedTags = []; appState.excludedTags = []; appState.sortMode = 'default'; appState.searchQuery = ''; appState.pathStack = []; appState.keepFilterState = false; document.getElementById('search-input').value = ''; ui.renderTagFilter(); browsePath(''); }); // モード切替＝別データ源のため並び順・タグ絞り込み・検索を完全リセット
     document.getElementById('search-btn').onclick = () => { const q = document.getElementById('search-input').value.trim(); if (q) performSearch(q, 'keyword'); };
@@ -112,6 +134,7 @@ function setupEventListeners() { // 全イベントリスナーの登録
                     appState.isRebuilding = true;
                     appState.currentSource = 'disk';
                     ui.renderTelemetry();
+                    ensureStatusPolling(); // 【バグ修正】再構築完了を自動検知して徽章を消す (従来は手動リフレッシュ頼み)
                     try {
                         ui.refreshAllTagsUI(); 
                         ui.renderTagFilter(); 

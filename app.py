@@ -227,21 +227,15 @@ def api_batch_edit(): # 一括編集（タグ保存とリネームのトラン�
 
             threading.Thread(target=locked_build).start()
             
-        # 5. クラウド同期 (ロック外で実行。失敗しても保存自体は成功として扱う)
-        rclone_report = []
+        # 5. クラウド同期はキュー投入のみ (moveto はバックグラウンドで直列実行し、保存応答を待たせない)
+        ops_baseline = backup_manager.get_ops_seq()
         for old_p, new_p in executed_renames:
-            try:
-                r = rsync.sync_rename(old_p, new_p, BASE_DIRS, RCLONE_CONFIG)
-            except Exception as e:
-                r = {"status": "error", "message": str(e)}
-            if r.get("status") != "disabled": rclone_report.append({"name": os.path.basename(new_p), **r})
-            idx = get_active_index(root_paths, new_p) # バックアップ完了記録のキー整合
-            if idx != -1:
-                old_rel = os.path.relpath(old_p, root_paths[idx]).replace('\\', '/')
-                new_rel = os.path.relpath(new_p, root_paths[idx]).replace('\\', '/')
-                if r.get("status") == "moved": backup_manager.migrate_status(mode, old_rel, new_rel) # クラウド側も移動済み → 緑を引き継ぐ
-                elif r.get("status") != "disabled": backup_manager.drop_status(mode, old_rel) # 移動できなかった/未バックアップ → 灰に戻して再バックアップを促す
-        return jsonify({"status": "success", "rclone_report": rclone_report, "rename_failures": rename_failures})
+            idx = get_active_index(root_paths, new_p)
+            if idx == -1: continue
+            old_rel = os.path.relpath(old_p, root_paths[idx]).replace('\\', '/')
+            new_rel = os.path.relpath(new_p, root_paths[idx]).replace('\\', '/')
+            backup_manager.enqueue_rename(mode, old_p, new_p, old_rel, new_rel, BASE_DIRS, RCLONE_CONFIG)
+        return jsonify({"status": "success", "rename_failures": rename_failures, "ops_baseline": ops_baseline})
     
     except Exception as e:
         import traceback
@@ -283,12 +277,7 @@ def api_delete_item(): # アイテムの物理削除 (ローカル削除 + タ�
         cache_res = logic.remove_item_from_cache(mode, full_path, DATA_DIR) # キャッシュから即時除去(タグは残す)
         if cache_res['status'] == 'error': print(f"Cache patch error ({mode}): {cache_res['message']}")
     backup_manager.drop_status(mode, media_rel) # 完了記録も破棄 (残っているとゾンビの緑ランプになる)
-    try:
-        rclone_result = rsync.sync_delete(full_path, is_dir, BASE_DIRS, RCLONE_CONFIG) # ロック外でクラウド同期。中止されたバックアップの断片がクラウドに残っていても、ここで purge され一掃される
-    except Exception as e: # ローカル削除は完了済みのため、同期失敗で 500 を返さない (二重の保険)
-        import traceback; print(f"Rclone sync error: {traceback.format_exc()}")
-        rclone_result = {"status": "error", "message": str(e)}
-    return jsonify({"status": "success", "rclone": rclone_result, "backup_canceled": backup_canceled})
+    return jsonify({"status": "success", "backup_canceled": backup_canceled}) # クラウド側は削除しない (管理 → クラウド差分 で確認の上整理)
 
 @app.route('/api/open_folder')
 def api_open_folder(): # ローカルフォルダを開く
@@ -341,7 +330,21 @@ def api_backup_item(): # 作品単位のクラウドバックアップをキュ�
 def api_status(): # 軽量ステータス (フロントのポーリング用): キャッシュ再構築状態 + バックアップタスク状態
     mode = request.args.get('mode', '') # CACHE_BUILD_LOCKS はフロントから渡る生の mode 文字列がキー (browse/search と同一規則)
     is_rebuilding = CACHE_BUILD_LOCKS[mode].locked() if mode in CACHE_BUILD_LOCKS else False
-    return jsonify({"is_rebuilding": is_rebuilding, "backups": backup_manager.get_live_tasks(), "backup_active": backup_manager.has_active()})
+    return jsonify({"is_rebuilding": is_rebuilding, "backups": backup_manager.get_live_tasks(), "backup_active": backup_manager.has_active(),
+                    "cloud_ops": backup_manager.get_ops_status()})
+
+@app.route('/api/cloud_diff')
+def api_cloud_diff(): # クラウドにのみ存在する項目の一覧 (同期実行、数秒程度)
+    try: return jsonify(backup_manager.compute_cloud_diff(MODES_CONFIG, BASE_DIRS, RCLONE_CONFIG))
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"status": "error", "message": f"差分チェック失敗: {e}"}), 500
+
+@app.route('/api/cloud_clean', methods=['POST'])
+def api_cloud_clean(): # 差分結果から選択された項目の削除をキューへ投入 (即時 return)
+    data = request.get_json() or {}
+    res = backup_manager.enqueue_cloud_clean(data.get('token'), data.get('items') or [], BASE_DIRS, RCLONE_CONFIG)
+    return jsonify(res), (200 if res.get("status") == "queued" else 400)
 
 @app.route('/api/dokidoki_media')
 def api_dokidoki_media(): # ドキドキモードのメディアリスト一括取得 (dokidoki_dirs 配下を全深度で再帰走査)

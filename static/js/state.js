@@ -21,7 +21,10 @@ export const appState = {
     keepFilterState: false, // フォルダ遷移をまたいで並び順・タグ絞り込みを維持するフラグ
     rootScrollTop: 0,       // ROOT ビューのスクロール位置（作品から復帰した際の復元用）
     restoreRootScroll: false, // 次回の ROOT 描画時にスクロール位置を復元するフラグ
-    liveBackups: {}          // 実行中/待機中/直近終了のバックアップタスク（/api/status のポーリング結果）
+    liveBackups: {},          // 実行中/待機中/直近終了のバックアップタスク（/api/status のポーリング結果）
+    lastCloudOpId: null,     // 通知済みのクラウド操作 ID (これより大きい ID のみ通知)
+    cloudOpsBuffer: [],      // 全件完了時にまとめて通知するための終了報告バッファ
+    cloudOpsPending: 0       // 待機中 + 実行中のクラウド操作件数 (徽章表示用)
 };
 
 export const playerState = {

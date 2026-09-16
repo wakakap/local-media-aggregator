@@ -29,7 +29,7 @@ async function browsePath(path, pushState = true) { // フォルダ閲覧処理
     } catch (e) { console.error(e); } finally { if (currentRenderId === appState.renderingId) ui.showLoading(false); }
 }
 let statusPollTimer = null; // /api/status ポーリング制御
-function ensureStatusPolling() { // 再構築中 or バックアップ実行中の間だけ 3 秒間隔でポーリング (アイドル時は完全停止)
+function ensureStatusPolling() { // 再構築中 / バックアップ実行中 / クラウド操作中の間だけ 3 秒間隔でポーリング
     if (statusPollTimer) return;
     const tick = async () => {
         try {
@@ -38,16 +38,34 @@ function ensureStatusPolling() { // 再構築中 or バックアップ実行中�
                 const wasRebuilding = appState.isRebuilding;
                 appState.isRebuilding = !!s.is_rebuilding;
                 appState.liveBackups = s.backups || {};
-                ui.renderTelemetry(); // 【バグ修正】従来この徽章は次の browse/search 応答でしか更新されず、手動リフレッシュまで「再構築中」のまま残っていた
+                if (s.cloud_ops) handleCloudOpsReport(s.cloud_ops); // renderTelemetry より前に件数を更新
+                ui.renderTelemetry();
                 ui.updateBackupDots();
-                if (wasRebuilding && !appState.isRebuilding) { appState.currentSource = 'cache'; ui.renderTelemetry(); } // 再構築完了 → ソース表示も即時に緑の Cache へ
-                const stillActive = appState.isRebuilding || s.backup_active;
+                if (wasRebuilding && !appState.isRebuilding) { appState.currentSource = 'cache'; ui.renderTelemetry(); }
+                const stillActive = appState.isRebuilding || s.backup_active || appState.cloudOpsPending > 0;
                 if (!stillActive) { clearInterval(statusPollTimer); statusPollTimer = null; }
             }
         } catch (e) { console.error('status poll error:', e); }
     };
     statusPollTimer = setInterval(tick, 3000);
     tick(); // 初回は即時実行
+}
+function handleCloudOpsReport(ops) { // クラウド操作 (リネーム同期 / 差分削除) の終了報告を、全件完了時にまとめて通知
+    appState.cloudOpsPending = ops.pending || 0;
+    const recent = ops.recent || [], maxId = recent.reduce((m, r) => Math.max(m, r.id), 0);
+    if (appState.lastCloudOpId === null) { appState.lastCloudOpId = maxId; return; } // 初回はベースライン設定のみ (過去分を再通知しない)
+    const fresh = recent.filter(r => r.id > appState.lastCloudOpId);
+    if (fresh.length) { appState.lastCloudOpId = maxId; appState.cloudOpsBuffer.push(...fresh); fresh.forEach(r => console.log(`☁️ [${r.kind}] ${r.status}: ${r.name}`, r.message || '')); }
+    if (appState.cloudOpsPending > 0 || !appState.cloudOpsBuffer.length) return; // 処理中はためておく
+    const buf = appState.cloudOpsBuffer; appState.cloudOpsBuffer = [];
+    const purges = buf.filter(r => r.kind === 'purge'), lines = [];
+    if (purges.length) {
+        const cnt = s => purges.filter(r => r.status === s).length;
+        lines.push(`🧹 クラウド整理完了: 削除 ${cnt('ok')} 件 / スキップ ${cnt('skipped')} 件 / 失敗 ${cnt('error')} 件`);
+        purges.filter(r => r.status === 'skipped').forEach(r => lines.push(`ℹ️ スキップ: ${r.name} (${r.message})`));
+    }
+    buf.filter(r => r.status === 'error').forEach(r => lines.push(`⚠️ ${r.kind === 'rename' ? 'リネーム同期' : '削除'}失敗: ${r.name} (${r.message || ''})`));
+    if (lines.length) setTimeout(() => alert(lines.join('\n')), 50);
 }
 function updateEditButtonUI() { // タグ編集UI更新
     const btn = document.getElementById('edit-tags-btn'), menu = document.getElementById('maintenance-menu');
@@ -111,7 +129,10 @@ function setupEventListeners() { // 全イベントリスナーの登録
     document.getElementById('reset-btn').onclick = () => window.dispatchEvent(new CustomEvent('reset-view')); // 重置：default と完全同一挙動
     document.getElementById('search-input').onkeydown = (e) => { if (e.key === 'Enter') document.getElementById('search-btn').click(); };
     document.getElementById('stats-btn').onclick = () => { const browseView = document.getElementById('browse-view'), statsView = document.getElementById('stats-view'); if (statsView.style.display === 'none') { browseView.style.display = 'none'; statsView.style.display = 'block'; document.getElementById('tag-filter-container').style.display = 'none'; document.getElementById('directory-header').style.display = 'none'; ui.renderStatsView(); } else { statsView.style.display = 'none'; browseView.style.display = 'block'; (!appState.inSearchMode && !appState.isRoot) ? document.getElementById('directory-header').style.display = 'flex' : document.getElementById('tag-filter-container').style.display = 'block'; } };
-    document.getElementById('maintenance-btn').onclick = () => { const menu = document.getElementById('maintenance-menu'); menu.style.display = menu.style.display === 'block' ? 'none' : 'block'; };
+        const maintenanceMenu = document.getElementById('maintenance-menu');
+    document.getElementById('maintenance-btn').onclick = (e) => { e.stopPropagation(); maintenanceMenu.style.display = maintenanceMenu.style.display === 'block' ? 'none' : 'block'; };
+    maintenanceMenu.addEventListener('click', (e) => { if (e.target.closest('button')) maintenanceMenu.style.display = 'none'; }, true); 
+    document.addEventListener('click', (e) => { if (!e.target.closest('#maintenance-menu, #maintenance-btn')) maintenanceMenu.style.display = 'none'; }); 
     document.getElementById('edit-tags-btn').onclick = async () => { 
         if (!appState.isTagEditMode) { 
             appState.isTagEditMode = true; 
@@ -134,6 +155,7 @@ function setupEventListeners() { // 全イベントリスナーの登録
                     appState.isRebuilding = true;
                     appState.currentSource = 'disk';
                     ui.renderTelemetry();
+                    if (res.ops_baseline !== undefined && (appState.lastCloudOpId === null || res.ops_baseline < appState.lastCloudOpId)) appState.lastCloudOpId = res.ops_baseline; // リネーム同期の終了報告を通知対象にする
                     ensureStatusPolling(); // 【バグ修正】再構築完了を自動検知して徽章を消す (従来は手動リフレッシュ頼み)
                     try {
                         ui.refreshAllTagsUI(); 
@@ -144,16 +166,7 @@ function setupEventListeners() { // 全イベントリスナーの登録
                     ui.showLoading(false);
                     setTimeout(() => {
                         alert("タグと名前の変更を保存しました！");
-                        if (res.rename_failures && res.rename_failures.length) alert("⚠️ 以下のリネームは実行できませんでした:\n" + res.rename_failures.map(f => `${f.path} (${f.reason})`).join('\n')); // 静かに握りつぶさず通知
-                        if (res.rclone_report && res.rclone_report.length) { // クラウド同期結果のサマリ
-                            const lines = res.rclone_report.map(r => {
-                                if (r.status === 'moved') return `☁️ 同期済: ${r.name}`;
-                                if (r.status === 'not_backed_up') return `ℹ️ 未バックアップのためスキップ: ${r.name}`;
-                                if (r.status === 'skipped') return `➖ 同期対象外: ${r.name}`;
-                                return `⚠️ 同期失敗: ${r.name} (${r.message || ''})`;
-                            });
-                            alert("クラウド同期結果:\n" + lines.join('\n'));
-                        }
+                        if (res.rename_failures && res.rename_failures.length) alert("⚠️ 以下のリネームは実行できませんでした:\n" + res.rename_failures.map(f => `${f.path} (${f.reason})`).join('\n'));
                     }, 50);
                 } else {
                     ui.showLoading(false);
@@ -169,6 +182,7 @@ function setupEventListeners() { // 全イベントリスナーの登録
     document.getElementById('update-cache-btn').onclick = async () => { if (confirm(`${appState.mode} モードのキャッシュを更新しますか？変更をフルスキャンするため数秒かかる場合があります。`)) { ui.showLoading(true); const res = await api.updateCache(appState.mode); ui.showLoading(false); if (res.status === 'success') { alert("キャッシュを更新しました！🚀"); window.dispatchEvent(new CustomEvent('refresh-view')); } else alert("キャッシュ更新失敗: " + res.message); document.getElementById('maintenance-menu').style.display = 'none'; } };
     document.getElementById('export-data-btn').onclick = async () => { if (confirm("すべての作品ディレクトリ構造をTXTファイルにエクスポートしますか？")) { ui.showLoading(true); const res = await api.exportData(); ui.showLoading(false); if (res.status === 'success') alert(`エクスポート成功！\n保存先: ${res.file}`); else alert("エクスポート失敗: " + (res.message || "不明なエラー")); document.getElementById('maintenance-menu').style.display = 'none'; } };
     document.getElementById('clean-data-btn').onclick = async () => { if (confirm("無効なタグと統計データをクリーンアップしますか？\n全ドライブをスキャンし、削除された作品の残留データを削除します。")) { ui.showLoading(true); const res = await api.cleanData(); ui.showLoading(false); if (res.status === 'success') { alert(`クリーンアップ完了！🧹\n無効なタグデータ ${res.tags_removed} 件、統計データ ${res.stats_removed} 件を削除しました`); appState.tagsData = await api.getTags(); ui.renderTagFilter(); window.dispatchEvent(new CustomEvent('refresh-view')); } else alert("クリーンアップ失敗: " + (res.message || "不明なエラー")); document.getElementById('maintenance-menu').style.display = 'none'; } };
+    document.getElementById('cloud-diff-btn').onclick = () => ui.openCloudDiffDialog();
     document.getElementById('tag-filter-expand-btn').onclick = () => document.getElementById('tag-filter-container').classList.toggle('expanded');
     const imageViewer = document.getElementById('image-viewer'); let touchStartX = 0, touchStartY = 0, isSwiping = false; // 画像ビューア操作用変数
     imageViewer.addEventListener('touchstart', (e) => { if (e.touches.length === 1) { touchStartX = e.touches[0].clientX; touchStartY = e.touches[0].clientY; isSwiping = false; } }, { passive: true });

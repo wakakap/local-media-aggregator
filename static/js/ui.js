@@ -79,6 +79,7 @@ function applySortToItems(items) { // カードソート処理（非破壊：渡
         if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1; // フォルダは常に先頭グループに固定
         if (appState.sortMode === 'name') return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }); // 文字・数値混在に対応した自然順
         if (appState.sortMode === 'size') { const sa = a.total_size || a.size || 0, sb = b.total_size || b.size || 0; return sb - sa; } // 大きい順（総体積 or ファイルサイズ）
+        if (appState.sortMode === 'mtime') return (b.mtime || 0) - (a.mtime || 0); // 新しい順（最新更新日時）
         return 0;
     });
 }
@@ -407,14 +408,78 @@ function showConfirmDialog(message, swapButtons, okText = '削除する', okColo
         box.append(msg, btnRow); overlay.appendChild(box); document.body.appendChild(overlay);
     });
 }
-export function notifyRcloneResult(r) { // クラウド同期結果の通知
-    if (!r || r.status === 'disabled') return;
-    if (r.status === 'not_backed_up') alert('ℹ️ クラウドに元のパスが存在しません。\nまだバックアップされていない項目のため、クラウド側の操作はスキップしました。');
-    else if (r.status === 'skipped') console.log('➖ rclone 同期対象外:', r.message);
-    else if (r.status === 'error') alert('⚠️ クラウド同期に失敗しました: ' + (r.message || '不明なエラー') + '\nローカル操作は完了済みです。次回のバックアップ/差分チェックで整合してください。');
-    else if (r.status === 'check_failed') alert('⚠️ クラウド側の存在確認に失敗しました: ' + (r.message || '') + '\n安全のためクラウド操作は行っていません。rclone の認証状態を確認してください。');
-    else console.log('☁️ クラウド同期完了:', r);
+export async function openCloudDiffDialog() { // 管理 → クラウド差分: クラウドにのみ存在する項目を一覧し、選択したものだけ削除
+    showLoading(true);
+    const res = await api.getCloudDiff();
+    showLoading(false);
+    if (!res || res.status !== 'success') { alert('差分チェック失敗:\n' + (res && (res.message || res.error) || '不明なエラー')); return; }
+    const total = res.modes.reduce((n, m) => n + m.extras.length, 0);
+    if (total === 0 && !res.errors.length) { alert('✅ クラウドとローカルは一致しています（クラウド側に余分な項目はありません）'); return; }
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:5000; display:flex; justify-content:center; align-items:center;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#2a2a2a; border:1px solid #555; border-radius:8px; padding:18px 22px; width:min(760px, 92vw); max-height:85vh; display:flex; flex-direction:column; color:#fff; box-shadow:0 4px 20px rgba(0,0,0,0.8);';
+    const title = document.createElement('div'); title.style.cssText = 'font-size:16px; font-weight:bold; margin-bottom:6px;'; title.textContent = `☁ クラウド差分チェック（クラウドのみに存在: ${total} 件）`;
+    const desc = document.createElement('div'); desc.style.cssText = 'font-size:12px; color:#aaa; margin-bottom:10px; line-height:1.6;';
+    desc.textContent = 'ローカルに存在しない項目です。削除するものだけチェックしてください（初期状態は全て未選択）。「大小文字違い」はローカルに大文字小文字だけ異なる同名項目があるものです。';
+    box.append(title, desc);
+    if (res.errors.length) { // 一覧取得に失敗したモードは比較していない旨を明示
+        const warn = document.createElement('div'); warn.style.cssText = 'font-size:12px; color:#ffcc00; margin-bottom:10px; white-space:pre-wrap; word-break:break-all;';
+        warn.textContent = '⚠️ 以下のモードはクラウド一覧の取得に失敗したため比較していません:\n' + res.errors.join('\n');
+        box.appendChild(warn);
+    }
+    const list = document.createElement('div'); list.style.cssText = 'overflow-y:auto; flex:1; border-top:1px solid #444; border-bottom:1px solid #444; padding:6px 0;';
+    const checkboxes = []; // { cb, mode, name, is_dir }
+    const selCount = document.createElement('span'); selCount.style.cssText = 'font-size:13px; color:#ccc; margin-right:auto;';
+    const okBtn = document.createElement('button'); okBtn.className = 'button'; okBtn.style.cssText = 'background-color:#c62828; border:none;';
+    const refresh = () => { const n = checkboxes.filter(c => c.cb.checked).length; selCount.textContent = `選択: ${n} / ${checkboxes.length} 件`; okBtn.textContent = `選択した ${n} 件をクラウドから削除`; okBtn.disabled = n === 0; okBtn.style.opacity = n === 0 ? '0.4' : '1'; };
+
+    res.modes.filter(m => m.extras.length).forEach(m => {
+        const head = document.createElement('label'); head.style.cssText = 'display:flex; align-items:center; gap:8px; padding:8px 4px 4px; font-weight:bold; color:#00ffcc; cursor:pointer;';
+        const all = document.createElement('input'); all.type = 'checkbox';
+        const headText = document.createElement('span'); headText.textContent = `${m.mode}（${m.extras.length} 件）`;
+        const remoteText = document.createElement('span'); remoteText.style.cssText = 'font-weight:normal; font-size:11px; color:#777;'; remoteText.textContent = m.remote_dir;
+        head.append(all, headText, remoteText); list.appendChild(head);
+        const group = [];
+        m.extras.forEach(ex => {
+            const row = document.createElement('label'); row.style.cssText = 'display:flex; align-items:center; gap:8px; padding:4px 4px 4px 24px; font-size:13px; cursor:pointer; border-radius:4px;';
+            row.onmouseenter = () => row.style.background = '#383838'; row.onmouseleave = () => row.style.background = '';
+            const cb = document.createElement('input'); cb.type = 'checkbox'; cb.onchange = () => { all.checked = group.every(g => g.checked); refresh(); };
+            const name = document.createElement('span'); name.style.cssText = 'flex:1; word-break:break-all;'; name.textContent = `${ex.is_dir ? '📁' : '📄'} ${ex.name}`;
+            row.append(cb, name);
+            if (ex.case_only) { const b = document.createElement('span'); b.style.cssText = 'font-size:11px; color:#ffcc00; border:1px solid #ffcc00; border-radius:3px; padding:0 4px; white-space:nowrap;'; b.textContent = '大小文字違い'; row.appendChild(b); }
+            const meta = document.createElement('span'); meta.style.cssText = 'font-size:11px; color:#888; white-space:nowrap;';
+            meta.textContent = [ex.mtime, (!ex.is_dir && ex.size >= 0) ? formatBytes(ex.size) : ''].filter(Boolean).join('  ');
+            row.appendChild(meta); list.appendChild(row);
+            group.push(cb); checkboxes.push({ cb, mode: m.mode, name: ex.name, is_dir: ex.is_dir });
+        });
+        all.onchange = () => { group.forEach(g => g.checked = all.checked); refresh(); };
+    });
+
+    const btnRow = document.createElement('div'); btnRow.style.cssText = 'display:flex; gap:12px; align-items:center; margin-top:12px;';
+    const cancelBtn = document.createElement('button'); cancelBtn.className = 'button'; cancelBtn.textContent = '閉じる';
+    const close = () => overlay.remove();
+    cancelBtn.onclick = close;
+    overlay.onclick = (e) => { if (e.target === overlay) close(); };
+    okBtn.onclick = async () => {
+        const picked = checkboxes.filter(c => c.cb.checked);
+        if (!picked.length) return;
+        const preview = picked.slice(0, 15).map(p => `・[${p.mode}] ${p.is_dir ? '📁' : '📄'} ${p.name}`).join('\n') + (picked.length > 15 ? `\n…ほか ${picked.length - 15} 件` : '');
+        if (!await showConfirmDialog(`以下の ${picked.length} 件をクラウドから削除しますか？\n\n${preview}`, false)) return;
+        if (!await showConfirmDialog('⚠️ 最終確認：クラウド上のデータを削除します。よろしいですか？', true)) return; // 2回目はボタン位置入替
+        const r = await api.cleanCloud(res.token, picked.map(p => ({ mode: p.mode, name: p.name })));
+        if (r.status === 'queued') {
+            if (appState.lastCloudOpId === null || r.ops_baseline < appState.lastCloudOpId) appState.lastCloudOpId = r.ops_baseline; // この時点以降の終了報告を通知対象にする
+            close();
+            window.dispatchEvent(new CustomEvent('ensure-status-polling')); // 完了はポーリングで検知して通知
+        } else alert('削除の開始に失敗: ' + (r.message || r.error || '不明なエラー'));
+    };
+    btnRow.append(selCount, cancelBtn, okBtn);
+    box.append(list, btnRow); overlay.appendChild(box); document.body.appendChild(overlay);
+    refresh();
 }
+
 function applyDotState(dot) { // ランプ1個の色を現在の状態から決定 (優先度: 実行中タスク > 永続完了記録)
     const t = (appState.liveBackups || {})[dot.dataset.key];
     dot.classList.remove('queued', 'uploading', 'done', 'error');
@@ -442,7 +507,7 @@ async function handleDeleteItem(item, elem) { // 削除処理 (二重確認 → 
     const kind = item.is_dir ? 'フォルダ' : 'ファイル';
     const liveTask = (appState.liveBackups || {})[`${appState.mode}:${item.media_path}`];
     const backupWarn = (liveTask && (liveTask.state === 'queued' || liveTask.state === 'uploading')) ? '\n⚠️ この作品は現在バックアップ中です。削除すると転送は中止されます。' : '';
-    if (!await showConfirmDialog(`${kind}「${item.name}」を削除しますか？\n※ローカルディスクから削除されます${backupWarn}`, false)) return;
+        if (!await showConfirmDialog(`${kind}「${item.name}」を削除しますか？\n※ローカルディスクから削除されます（クラウド側は残ります。管理 → クラウド差分で整理）${backupWarn}`, false)) return;
     if (!await showConfirmDialog(`⚠️ 最終確認：本当に削除してよろしいですか？`, true)) return; // 2回目はボタン位置入替
     const targetPath = item.original_full_path || item.full_path; // 未保存リネームがある場合、ディスク上はまだ旧名のため元パスで削除
     if (appState.pendingRenames) delete appState.pendingRenames[targetPath]; // 削除するものの未保存リネームは破棄
@@ -457,7 +522,7 @@ async function handleDeleteItem(item, elem) { // 削除処理 (二重確認 → 
         if (appState.pendingDeletes) appState.pendingDeletes.push(compositeKey); // タグ破棄はディスク削除時に即時反映せず、保存時にまとめて処理（削除直後に同名フォルダを補充する運用に対応）
         delete appState.liveBackups[`${appState.mode}:${item.media_path}`]; // ランプ用タスク情報も掃除
         if (res.backup_canceled) console.log('☁ 実行中だったバックアップを中止しました:', item.name);
-        notifyRcloneResult(res.rclone);
+
     } else alert('削除失敗: ' + (res.message || res.error || '不明なエラー'));
 }
 export function renderTagFilter() { // タグフィルターUI構築
@@ -474,10 +539,11 @@ export function renderTagFilter() { // タグフィルターUI構築
     });
 }
 function renderSortControls(container) { // 並べ替え制御ボタン生成（default / 文字順 / サイズ順、filter-tag スタイルを流用）
-    const defs = [ // [ラベル, 状態値]
-        { label: 'default', value: 'default' }, // 全リセット（並び順・タグ絞り込み・検索をクリア）
-        { label: '文字順', value: 'name' },     // 按字符顺序
-        { label: 'サイズ順', value: 'size' }    // 按大小排序
+    const defs = [
+        { label: 'default', value: 'default' },
+        { label: '文字順', value: 'name' },
+        { label: 'サイズ順', value: 'size' },
+        { label: '更新日順', value: 'mtime' }   // 按本地修改日期，新的在前
     ];
     defs.forEach(def => {
         const btn = document.createElement('span'); btn.className = 'filter-tag control-tag'; btn.textContent = def.label;
@@ -809,6 +875,8 @@ export function renderTelemetry() { // Telemetry Dashboard
         badgeBackup.style.display = activeCount > 0 ? 'block' : 'none';
         badgeBackup.textContent = `☁ 備份中 ×${activeCount}`;
     }
+    const badgeOps = document.getElementById('badge-cloud-ops'); // 2.6 クラウド操作 (リネーム同期/差分削除) の処理中件数
+    if (badgeOps) { const n = appState.cloudOpsPending || 0; badgeOps.style.display = n > 0 ? 'block' : 'none'; badgeOps.textContent = `☁ クラウド操作中 ×${n}`; }
     // 3. データソースの切り替え
     if (appState.currentSource) {
         badgeSource.style.display = 'block';

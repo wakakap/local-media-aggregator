@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-import os, sys, json, time, queue, tempfile, threading, subprocess
+import os, sys, json, time, queue, uuid, tempfile, threading, subprocess, traceback, unicodedata
+from collections import deque
 import rclone_sync as rsync
 
 # ==========================================
@@ -186,3 +187,139 @@ def get_live_tasks(): # 現在のタスク状況 (/api/status 用)。終了済�
 
 def has_active(): # 実行中/待機中タスクの有無
     with _LOCK: return any(t["state"] in ("queued", "uploading") for t in _TASKS.values())
+
+# ==========================================
+# クラウド操作キュー (v2)
+# リネーム同期 (moveto) と差分削除 (purge/deletefile) を専用ワーカー 1 本で直列実行する。
+# アップロード用キューとは別なので、大容量バックアップの後ろで待たされない。
+# 直列なので A→B→C の連続リネームも順序通りに反映される。
+# ==========================================
+_OPS_QUEUE = queue.Queue()
+_OPS_WORKER = None
+_OPS_SEQ = 0                        # 終了済み操作の通し番号 (フロントの通知重複防止用)
+_OPS_PENDING = 0                    # 待機中 + 実行中の件数
+_OPS_RECENT = deque(maxlen=200)     # 終了済み操作 {id, kind, name, status(ok/skipped/error), message}
+_LAST_DIFF = {"token": None, "ts": 0, "items": {}} # 直近の差分結果。削除要求はここに載っている項目のみ受け付ける
+_DIFF_TTL = 1800                    # 差分結果の有効期限 (秒)
+
+def _ensure_ops_worker():
+    global _OPS_WORKER
+    with _LOCK:
+        if _OPS_WORKER is None or not _OPS_WORKER.is_alive():
+            _OPS_WORKER = threading.Thread(target=_ops_loop, daemon=True, name="cloud-ops"); _OPS_WORKER.start()
+
+def _enqueue_op(op):
+    global _OPS_PENDING
+    _ensure_ops_worker()
+    with _LOCK: _OPS_PENDING += 1
+    _OPS_QUEUE.put(op)
+
+def _ops_loop(): # 例外を外へ漏らさず、1 操作につき必ず 1 件の終了報告を残す
+    global _OPS_SEQ, _OPS_PENDING
+    while True:
+        op = _OPS_QUEUE.get()
+        try:
+            if op["kind"] == "rename": status, msg = _op_rename(op)
+            elif op["kind"] == "purge": status, msg = _op_purge(op)
+            else: status, msg = "error", f"未知の操作: {op['kind']}"
+        except Exception as e:
+            traceback.print_exc(); status, msg = "error", str(e)
+        with _LOCK:
+            _OPS_SEQ += 1; _OPS_PENDING -= 1
+            _OPS_RECENT.append({"id": _OPS_SEQ, "kind": op["kind"], "name": op.get("name", ""), "status": status, "message": msg})
+        print(f"[cloud-ops] {op['kind']} {status}: {op.get('name', '')} {msg}")
+        _OPS_QUEUE.task_done()
+
+def get_ops_seq():
+    with _LOCK: return _OPS_SEQ
+
+def get_ops_status(): # /api/status 用
+    with _LOCK: return {"pending": _OPS_PENDING, "recent": list(_OPS_RECENT)}
+
+# ---------- リネーム同期 ----------
+def enqueue_rename(mode, old_full, new_full, old_rel, new_rel, base_dirs, cfg): # 即時 return。完了記録は楽観的に先行移行 (ランプの緑を即時引き継ぐ)
+    migrate_status(mode, old_rel, new_rel)
+    if not cfg.get("enabled", False): return
+    _enqueue_op({"kind": "rename", "mode": mode, "name": os.path.basename(new_full), "old_full": old_full, "new_full": new_full,
+                 "new_rel": new_rel, "base_dirs": list(base_dirs), "cfg": dict(cfg)})
+
+def _op_rename(op):
+    r = rsync.sync_rename(op["old_full"], op["new_full"], op["base_dirs"], op["cfg"])
+    st = r.get("status")
+    if st == "moved": return "ok", ""
+    drop_status(op["mode"], op["new_rel"]) # 移動できなかった → 新名は灰に戻す (クラウドの旧名は差分チェックで検出される)
+    if st in ("not_backed_up", "skipped", "disabled"): return "skipped", r.get("message", "")
+    return "error", r.get("message", "") or st
+
+# ---------- 差分チェック ----------
+def _local_top_names(base_dirs, pages): # 全ドライブの pages 直下名の和集合 (NFC 正規化)。listdir の例外は呼び出し元へ伝播させる
+    exact, folded = set(), set()
+    for base in base_dirs:
+        d = os.path.join(base, pages)
+        if not os.path.isdir(d): continue # ドライブは接続済みだがこのモードのフォルダが無い = 空扱い
+        for n in os.listdir(d):
+            nfc = unicodedata.normalize("NFC", n)
+            exact.add(nfc); folded.add(nfc.casefold())
+    return exact, folded
+
+def compute_cloud_diff(modes_config, base_dirs, cfg): # クラウドにのみ存在する作品単位の項目を列挙
+    global _LAST_DIFF
+    if not cfg.get("enabled", False): return {"status": "error", "message": "rclone 同期が config で無効になっています"}
+    remote_root = cfg.get("remote_name", "").rstrip("/")
+    if not remote_root: return {"status": "error", "message": "config の remote_name が未設定です"}
+    missing = [b for b in base_dirs if not os.path.isdir(b)]
+    if missing: return {"status": "error", "message": "未接続のドライブがあるため中止しました (その中の作品が全て削除候補になるのを防ぐため):\n" + "\n".join(missing)}
+    with _LOCK: busy = _OPS_PENDING > 0
+    if busy: return {"status": "error", "message": "クラウド操作 (リネーム同期/削除) が処理中です。完了後に再実行してください"}
+    excludes = set(cfg.get("exclude_keywords", ["THUMBNAILS"]))
+    modes_out, index, errors = [], {}, []
+    for mode in sorted(modes_config.keys()):
+        pages = modes_config[mode]["pages"]
+        remote_dir = f"{remote_root}/{pages.replace(os.sep, '/').strip('/')}" # local_to_remote と同一規則 (remote_name + base_dir からの相対パス)
+        entries, err = rsync.list_remote_dir(remote_dir, cfg)
+        if entries is None: errors.append(f"{mode}: {err}"); continue # 取得失敗のモードは比較しない (空扱いにしない)
+        local_exact, local_folded = _local_top_names(base_dirs, pages)
+        extras = []
+        for e in entries:
+            name = e.get("Name", "")
+            if not name or "/" in name or name in (".", "..") or name in excludes: continue # 不正名・除外対象は候補に載せない
+            nfc = unicodedata.normalize("NFC", name)
+            if nfc in local_exact: continue
+            extras.append({"name": name, "is_dir": bool(e.get("IsDir")), "size": e.get("Size", -1),
+                           "mtime": (e.get("ModTime") or "")[:16].replace("T", " "), "case_only": nfc.casefold() in local_folded})
+            index[(mode, name)] = {"remote": f"{remote_dir}/{name}", "is_dir": bool(e.get("IsDir")), "pages": pages}
+        extras.sort(key=lambda x: x["name"].lower())
+        modes_out.append({"mode": mode, "remote_dir": remote_dir, "extras": extras})
+    token = uuid.uuid4().hex
+    with _LOCK: _LAST_DIFF = {"token": token, "ts": time.time(), "items": index}
+    return {"status": "success", "token": token, "modes": modes_out, "errors": errors}
+
+# ---------- 差分削除 ----------
+def enqueue_cloud_clean(token, items, base_dirs, cfg): # 直近の差分結果に含まれる項目のみ削除キューへ (任意パスの削除を構造的に不可能にする)
+    global _LAST_DIFF
+    with _LOCK:
+        if not token or token != _LAST_DIFF["token"] or time.time() - _LAST_DIFF["ts"] > _DIFF_TTL:
+            return {"status": "error", "message": "差分結果が古いか無効です。もう一度差分チェックを実行してください"}
+        index = _LAST_DIFF["items"]
+        picked = [(it.get("mode"), it.get("name"), index[(it.get("mode"), it.get("name"))])
+                  for it in items if (it.get("mode"), it.get("name")) in index]
+        _LAST_DIFF = {"token": None, "ts": 0, "items": {}} # トークンは使い捨て (二重送信防止)
+        baseline = _OPS_SEQ
+    if not picked: return {"status": "error", "message": "削除対象がありません"}
+    for mode, name, info in picked:
+        _enqueue_op({"kind": "purge", "mode": mode, "name": name, "remote": info["remote"], "is_dir": info["is_dir"],
+                     "pages": info["pages"], "base_dirs": list(base_dirs), "cfg": dict(cfg)})
+    return {"status": "queued", "count": len(picked), "ops_baseline": baseline}
+
+def _op_purge(op):
+    missing = [b for b in op["base_dirs"] if not os.path.isdir(b)]
+    if missing: return "error", "ドライブ未接続のため中止しました: " + ", ".join(missing)
+    local_exact, _ = _local_top_names(op["base_dirs"], op["pages"]) # 実行直前に再確認 (差分表示後に同名作品を戻した場合を保護)
+    if unicodedata.normalize("NFC", op["name"]) in local_exact: return "skipped", "ローカルに同名項目が存在するため削除しませんでした"
+    result = rsync._run_rclone(["purge" if op["is_dir"] else "deletefile", op["remote"]], op["cfg"],
+                               timeout=op["cfg"].get("purge_timeout_seconds", 3600)) # 大容量フォルダの purge 用に長めのタイムアウト
+    if result.returncode == 0:
+        drop_status(op["mode"], op["name"]); return "ok", ""
+    if result.returncode in (3, 4):
+        drop_status(op["mode"], op["name"]); return "skipped", "クラウド側に既に存在しません"
+    return "error", (result.stderr or "").strip()[-300:] or f"rclone 終了コード {result.returncode}"

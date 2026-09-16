@@ -216,15 +216,22 @@ def get_game_cover_thumbnail(full_path, cover_path, base_name, allow_subdir_fall
         print(f"Cover extraction failed for {full_path}: {e}")
         return None
 
-def calc_folder_total_size(folder_path): # フォルダ配下の全ファイル総体積を集計（最外層作品のみで使用）
-    total = 0
+def calc_folder_stats(folder_path): # フォルダ配下の総体積と最新更新日時を 1 回の走査で集計（最外層作品のみで使用）
+    total, latest = 0, 0.0
+    future_limit = time.time() + 86400 # 未来日付の壊れたタイムスタンプ（解凍物等）で永久に最上位へ固定されるのを防ぐ
     for root, _dirs, files in os.walk(folder_path):
+        try:
+            m = os.path.getmtime(root) # フォルダ自体の mtime（直下の追加・削除・改名で更新）
+            if latest < m <= future_limit: latest = m
+        except OSError: pass
         for f in files:
             try:
-                total += os.path.getsize(os.path.join(root, f))
+                st = os.stat(os.path.join(root, f)) # getsize と getmtime を 1 回の stat に統合
+                total += st.st_size
+                if latest < st.st_mtime <= future_limit: latest = st.st_mtime
             except OSError:
                 pass # 壊れたシンボリックリンク / アクセス不可ファイルは無視して継続
-    return total
+    return total, latest
 
 def _create_item_data(full_path, root_path, cover_path, all_tags, cover_map, mode, allow_thumbnail_gen=True): # アイテムデータの生成
     item_name = os.path.basename(full_path)
@@ -261,8 +268,12 @@ def _create_item_data(full_path, root_path, cover_path, all_tags, cover_map, mod
                     data["cover_source"] = "local"
             if source_image_path and allow_thumbnail_gen:
                 data["thumbnail_filename"] = get_or_create_thumbnail(source_image_path, cover_path, name_no_ext)
-            if allow_thumbnail_gen and not is_savedata: data["total_size"] = calc_folder_total_size(full_path) # 最外層作品フォルダのみ総体積を付与（allow_thumbnail_gen が最外層の判定を兼ねる）
-    else: data["media_type"] = get_file_media_type(item_name)
+            if allow_thumbnail_gen and not is_savedata: data["total_size"], data["mtime"] = calc_folder_stats(full_path) # 最外層作品のみ総体積と最新更新日時を付与
+    else:
+        data["media_type"] = get_file_media_type(item_name)
+        if allow_thumbnail_gen: # 最外層の単体ファイルにも更新日時を付与（更新日順ソート用）
+            try: data["mtime"] = os.path.getmtime(full_path)
+            except OSError: pass
     return data
 
 def get_directory_items(current_path, root_path, cover_path, all_tags, cover_map, mode): # フォルダ内アイテムの取得

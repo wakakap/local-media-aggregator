@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, sys, subprocess, traceback
+import os, sys, json, subprocess, traceback
 
 # ==========================================
 # rclone クラウド同期モジュール (v2)
@@ -94,12 +94,25 @@ def sync_rename(old_full, new_full, base_dirs, cfg): # リネームのクラウ�
         traceback.print_exc()
         return {"status": "error", "message": str(e)}
 
-def sync_delete(full_path, is_dir, base_dirs, cfg): # 削除のクラウド反映 (フォルダ=purge / ファイル=deletefile) ※例外を外に漏らさない
-    if not cfg.get("enabled", False): return {"status": "disabled"}
-    try:
-        return _do_sync('delete', [full_path], base_dirs, cfg, is_dir=is_dir)
+# def sync_delete(full_path, is_dir, base_dirs, cfg): # 削除のクラウド反映 (フォルダ=purge / ファイル=deletefile) ※例外を外に漏らさない
+#     if not cfg.get("enabled", False): return {"status": "disabled"}
+#     try:
+#         return _do_sync('delete', [full_path], base_dirs, cfg, is_dir=is_dir)
+#     except FileNotFoundError:
+#         return {"status": "error", "message": "rclone コマンドが見つかりません (Path を確認してください)"}
+#     except Exception as e:
+#         traceback.print_exc()
+#         return {"status": "error", "message": str(e)}
+
+def list_remote_dir(remote_dir, cfg): # クラウド側ディレクトリ直下の一覧 → (entries, None) / (None, エラー文)。ディレクトリ自体が無ければ空リスト
+    try: # crypt リモート経由なのでファイル名は rclone が自動復号して返す
+        result = _run_rclone(["lsjson", remote_dir, "--no-mimetype"], cfg, timeout=cfg.get("list_timeout_seconds", 120))
+        if result.returncode == 3: return [], None # directory not found = このモードはまだ一度もバックアップされていない
+        if result.returncode != 0: return None, (result.stderr or "").strip()[-300:] or f"rclone 終了コード {result.returncode}"
+        return json.loads(result.stdout or "[]"), None
+    except subprocess.TimeoutExpired:
+        return None, "一覧取得がタイムアウトしました (ネットワーク/認証を確認してください)"
     except FileNotFoundError:
-        return {"status": "error", "message": "rclone コマンドが見つかりません (Path を確認してください)"}
+        return None, "rclone コマンドが見つかりません (Path を確認してください)"
     except Exception as e:
-        traceback.print_exc()
-        return {"status": "error", "message": str(e)}
+        return None, str(e)

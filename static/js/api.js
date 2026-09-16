@@ -24,3 +24,5 @@ export const saveBatchEdits = (mode, tagsData, renames) => fetchJson('/api/batch
 export const deleteItem = (mode, fullPath) => fetchJson('/api/delete_item', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode, full_path: fullPath})}); // アイテム物理削除 (ローカル + クラウド同期)
 export const backupItem = (mode, fullPath) => fetchJson('/api/backup_item', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode, full_path: fullPath})}); // 作品のクラウドバックアップをキューへ投入
 export const getStatus = (mode) => fetchJson(`/api/status?mode=${encodeURIComponent(mode)}`); // 再構築・バックアップ状態の軽量ポーリング
+export const getCloudDiff = () => fetchJson('/api/cloud_diff'); // クラウドにのみ存在する項目の一覧
+export const cleanCloud = (token, items) => fetchJson('/api/cloud_clean', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({token, items}) }); // 選択項目のクラウド削除をキューへ

@@ -125,7 +125,7 @@ function renderCard(item, targetElement = mediaContainer) { // グリッドカ�
     else { img.style.display = 'none'; clone.querySelector('.placeholder-text').textContent = item.name_no_ext; }
     renderTags(tagsEl, item);
     clone.querySelector('.card-image-wrapper').onclick = (e) => { e.stopPropagation(); handleItemClick(item); };
-    card.ondblclick = () => { if (appState.isTagEditMode) enableRename(card, item, nameEl); };
+    card.ondblclick = () => { if (appState.isTagEditMode && !item.media_path.includes('/')) enableRename(card, item, nameEl); }; // 改名は作品 (最上位) のみ許可 (検索結果の深層カードは不可)
     const bkBtn = document.createElement('span'); bkBtn.className = 'card-backup-btn'; bkBtn.textContent = '☁'; bkBtn.title = 'クラウドへバックアップ'; // 編集モード時のみCSSで表示 (×の左隣)
     bkBtn.onclick = (e) => { e.stopPropagation(); handleBackupItem(item); };
     card.appendChild(bkBtn);
@@ -144,6 +144,12 @@ function renderFileRow(item, targetElement = mediaContainer) { // リスト行�
     name.textContent = item.name;
     if (item.media_type === 'audio' && playerState.currentTrack && playerState.currentTrack.full_path === item.full_path) row.classList.add('playing');
     row.onclick = () => handleItemClick(item);
+    const dot = document.createElement('span'); dot.className = 'card-backup-dot row-backup-dot'; dot.dataset.key = `${appState.mode}:${item.media_path}`; // 行頭のバックアップ状態ランプ (カードと同じ着色ロジック、updateBackupDots の対象にも含まれる)
+    if (item.backed_up) dot.dataset.done = '1';
+    row.insertBefore(dot, icon); applyDotState(dot);
+    const bkBtn = document.createElement('span'); bkBtn.className = 'row-backup-btn'; bkBtn.textContent = '☁'; bkBtn.title = item.is_dir ? 'フォルダ全体をクラウドへ同期' : 'ファイルをクラウドへ同期'; // 編集モード時のみCSSで表示 (×の左隣)
+    bkBtn.onclick = (e) => { e.stopPropagation(); handleBackupItem(item); };
+    row.appendChild(bkBtn);
     const delBtn = document.createElement('span'); delBtn.className = 'row-delete-btn'; delBtn.textContent = '×'; delBtn.title = '削除'; // 編集モード時のみCSSで表示
     delBtn.onclick = (e) => { e.stopPropagation(); handleDeleteItem(item, row); };
     row.appendChild(delBtn);
@@ -490,12 +496,15 @@ function applyDotState(dot) { // ランプ1個の色を現在の状態から決�
 }
 export function updateBackupDots() { document.querySelectorAll('.card-backup-dot').forEach(applyDotState); } // 全カードのランプを再着色 (ポーリング応答時に呼ばれる)
 async function handleBackupItem(item) { // ☁ボタン: 作品単位のバックアップをキューへ投入 (非同期・多重投入可)
-    if (appState.pendingRenames && Object.keys(appState.pendingRenames).some(p => p === (item.original_full_path || item.full_path))) { alert('この作品には未保存のリネームがあります。\n先に「タグを保存」してからバックアップしてください。'); return; }
+    const target = item.original_full_path || item.full_path, sep = target.includes('\\') ? '\\' : '/';
+    const related = (p) => p === target || p.startsWith(target + sep) || target.startsWith(p + sep); // 自身・祖先・配下のいずれか
+    if (appState.pendingRenames && Object.keys(appState.pendingRenames).some(related)) { alert('この項目（または親/配下）に未保存のリネームがあります。\n先に「タグを保存」してから同期してください。'); return; }
     const key = `${appState.mode}:${item.media_path}`;
     const t = (appState.liveBackups || {})[key];
     if (t && (t.state === 'queued' || t.state === 'uploading')) { alert('この作品は既にバックアップ待機中/実行中です'); return; }
     const sizeInfo = item.total_size ? `\n体積: ${formatBytes(item.total_size)}` : '';
-    if (!await showConfirmDialog(`「${item.name}」をクラウドへバックアップしますか？${sizeInfo}\n※バックアップ中も通常の閲覧・操作は可能です`, false, '備份開始', '#2e7d32')) return;
+    const scope = item.is_dir ? '\n※表示内容ではなく、ディスク上のフォルダ全体が対象です。\n　クラウド側の同フォルダはローカルと完全一致するよう同期され、ローカルに無いファイルはクラウドから削除されます。' : '';
+    if (!await showConfirmDialog(`「${item.name}」をクラウドへ同期しますか？${sizeInfo}${scope}\n※同期中も通常の閲覧・操作は可能です`, false, '同期開始', '#2e7d32')) return;
     const res = await api.backupItem(appState.mode, item.original_full_path || item.full_path);
     if (res.status === 'queued' || res.status === 'already') {
         appState.liveBackups[res.key || key] = { state: 'queued', message: '' };
@@ -504,11 +513,11 @@ async function handleBackupItem(item) { // ☁ボタン: 作品単位のバッ�
     } else alert('バックアップ開始に失敗: ' + (res.message || res.error || '不明なエラー'));
 }
 async function handleDeleteItem(item, elem) { // 削除処理 (二重確認 → 実行中バックアップの中止 → ローカル削除 → クラウド同期)
-    const kind = item.is_dir ? 'フォルダ' : 'ファイル';
-    const liveTask = (appState.liveBackups || {})[`${appState.mode}:${item.media_path}`];
-    const backupWarn = (liveTask && (liveTask.state === 'queued' || liveTask.state === 'uploading')) ? '\n⚠️ この作品は現在バックアップ中です。削除すると転送は中止されます。' : '';
-        if (!await showConfirmDialog(`${kind}「${item.name}」を削除しますか？\n※ローカルディスクから削除されます（クラウド側は残ります。管理 → クラウド差分で整理）${backupWarn}`, false)) return;
-    if (!await showConfirmDialog(`⚠️ 最終確認：本当に削除してよろしいですか？`, true)) return; // 2回目はボタン位置入替
+    const kind = item.is_dir ? 'フォルダ' : 'ファイル', myKey = `${appState.mode}:${item.media_path}`;
+    const live = Object.entries(appState.liveBackups || {}).find(([k, t]) => (t.state === 'queued' || t.state === 'uploading') && (k === myKey || k.startsWith(myKey + '/') || myKey.startsWith(k + '/'))); // 自身・祖先・配下の同期タスク
+    const backupWarn = live ? `\n⚠️ 関連する同期タスク（${live[0].slice(live[0].indexOf(':') + 1)}）が実行中です。削除すると中止されます。` : '';
+    const scope = item.is_dir ? '\n※表示されていないファイル（非対応形式・隠しファイル等）も含め、ディスク上のフォルダ全体が削除されます。' : '';
+    if (!await showConfirmDialog(`${kind}「${item.name}」を削除しますか？${scope}\n※ローカルディスクから削除されます（クラウド側は残ります。親フォルダの ☁ 再同期、または 管理 → クラウド差分で整理）${backupWarn}`, false)) return;
     const targetPath = item.original_full_path || item.full_path; // 未保存リネームがある場合、ディスク上はまだ旧名のため元パスで削除
     if (appState.pendingRenames) delete appState.pendingRenames[targetPath]; // 削除するものの未保存リネームは破棄
     showLoading(true);
@@ -743,6 +752,22 @@ let dkdMasterTimer = null, dkdMediaTimeout = null, dkdMediaList = [], dkdIsPlayi
 let dkdAngle = Math.random() * Math.PI, dkdDirection = 1, dkdHue = Math.random() * 360, dkdActiveLayer = 0;
 const dokiAudio = new Audio('/static/doki.wav');
 
+let dkdSoundOn = true, dkdFilter = 'mixed'; // リズム音 ON/OFF, 候補の種類 ('mixed' | 'image' | 'video')
+function getDkdPool() { return dkdFilter === 'mixed' ? dkdMediaList : dkdMediaList.filter(m => m.type === dkdFilter); } // 現在の筛选に合う候補
+function discardDkdQueue() { dkdMediaQueue.forEach(el => { if (el.tagName === 'VIDEO') { el.pause(); el.removeAttribute('src'); el.load(); } }); dkdMediaQueue = []; } // 旧条件で先読みした要素を破棄
+function updateDkdControlsUI() {
+    document.querySelectorAll('.dkd-filter-btn').forEach(b => b.style.background = b.dataset.filter === dkdFilter ? '#D9534F' : '');
+    const sb = document.getElementById('dkd-sound-btn'); sb.textContent = `リズム音: ${dkdSoundOn ? 'ON' : 'OFF'}`; sb.style.opacity = dkdSoundOn ? '1' : '0.5';
+}
+document.querySelectorAll('.dkd-filter-btn').forEach(b => b.onclick = () => {
+    if (dkdFilter === b.dataset.filter) return;
+    dkdFilter = b.dataset.filter; updateDkdControlsUI();
+    if (getDkdPool().length === 0) { alert('この種類のメディアが見つかりません。'); return; }
+    discardDkdQueue(); maintainPreloadQueue(); // 再生中なら次の切替から新条件が反映される
+});
+document.getElementById('dkd-sound-btn').onclick = () => { dkdSoundOn = !dkdSoundOn; updateDkdControlsUI(); };
+updateDkdControlsUI();
+
 // 🌟 究極最適化：メモリキュー（事前デコード済みの要素をストックする）
 let dkdMediaQueue = []; 
 const MAX_PRELOAD = 4; // 常に4つのメディアをバックグラウンドで完全解析・待機させておく
@@ -764,6 +789,7 @@ dkdBeatsSwitch.oninput = (e) => { document.getElementById('dkd-beats-switch-val'
 dkdStartBtn.onclick = () => { // 再生トグルと初期化
     if(dkdIsPlaying) stopDokidoki(); 
     else { 
+        if (getDkdPool().length === 0) { alert('この種類のメディアが見つかりません。'); return; }
         dkdIsPlaying = true; dkdSpotlight.style.display = 'block'; dkdBeatCount = 0; dkdActiveLayer = 0; dkdMediaQueue = [];
         
         // 双缓冲レイヤー初期化
@@ -787,9 +813,10 @@ dkdStartBtn.onclick = () => { // 再生トグルと初期化
 };
 
 function maintainPreloadQueue() { // バックグラウンド非同期キュー補充（メインスレッドをブロックしない）
-    if (!dkdIsPlaying || dkdMediaList.length === 0) return;
-    while (dkdMediaQueue.length < MAX_PRELOAD) {
-        const item = dkdMediaList[Math.floor(Math.random() * dkdMediaList.length)];
+        const pool = getDkdPool();
+        if (!dkdIsPlaying || pool.length === 0) return;
+        while (dkdMediaQueue.length < MAX_PRELOAD) {
+            const item = pool[Math.floor(Math.random() * pool.length)];
         const css = 'width: 100%; height: 100%; object-fit: contain; display: block; transform: translateZ(0);'; 
         const src = `/api/dokidoki_file/${item.path.split('/').map(encodeURIComponent).join('/')}`;
 
@@ -819,11 +846,11 @@ function restartTimer() { clearInterval(dkdMasterTimer); dkdMasterTimer = setInt
 
 function stopDokidoki() { 
     clearInterval(dkdMasterTimer); clearTimeout(dkdMediaTimeout); dkdIsPlaying = false; 
-    dkdContainer.innerHTML = ''; dkdSpotlight.style.display = 'none'; dkdMediaQueue = [];
+    dkdContainer.innerHTML = ''; dkdSpotlight.style.display = 'none'; discardDkdQueue();
     dkdStartBtn.textContent = "START"; dkdStartBtn.style.background = "#2e7d32"; 
 } 
 
-function playTickSound() { const a = dokiAudio.cloneNode(); a.volume = 0.5; a.play().catch(()=>{}); }
+function playTickSound() { if (!dkdSoundOn) return; const a = dokiAudio.cloneNode(); a.volume = 0.5; a.play().catch(()=>{}); }
 
 function beatProcess() { 
     playTickSound(); dkdBeatCount++; 
@@ -845,7 +872,7 @@ function sweepSpotlightAndSwitch() {
 }
 
 function triggerMediaSwitch() { // オパシティ反転による極速切替と次弾装填
-    if(dkdMediaList.length === 0 || !dkdIsPlaying) return;
+    if(getDkdPool().length === 0 || !dkdIsPlaying) return;
     const currentLayer = document.getElementById(`dkd-layer-${dkdActiveLayer}`);
     dkdActiveLayer = 1 - dkdActiveLayer; 
     const nextLayer = document.getElementById(`dkd-layer-${dkdActiveLayer}`);

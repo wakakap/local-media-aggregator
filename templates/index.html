@@ -140,6 +140,12 @@
                 </div>
                 <input type="range" id="dkd-beats-switch" min="1" max="10" step="1" value="4" style="width: 100%;">
             </div>
+            <div style="display: flex; gap: 6px;">
+                <button class="button dkd-filter-btn" data-filter="mixed" style="flex:1; padding:4px 0; font-size:11px; border:none;">混合</button>
+                <button class="button dkd-filter-btn" data-filter="image" style="flex:1; padding:4px 0; font-size:11px; border:none;">画像のみ</button>
+                <button class="button dkd-filter-btn" data-filter="video" style="flex:1; padding:4px 0; font-size:11px; border:none;">動画のみ</button>
+            </div>
+            <button id="dkd-sound-btn" class="button" style="padding:4px 0; font-size:12px; border:none;">リズム音: ON</button>
             <button id="dkd-start-btn" class="button" style="margin-top: 5px; padding: 10px; font-size: 14px; background: #2e7d32; font-weight: bold; border: none; letter-spacing: 2px;">START</button>
         </div>
     </div>

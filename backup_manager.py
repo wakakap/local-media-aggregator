@@ -60,9 +60,16 @@ def _set(key, state, message=""): # タスク状態の更新
 
 def enqueue(key, full_path, is_dir, base_dirs, cfg): # バックアップ要求の受付 (即時 return、実行はワーカー)
     _ensure_workers(cfg)
+    tgt = os.path.normpath(full_path)
     with _LOCK:
         t = _TASKS.get(key)
         if t and t["state"] in ("queued", "uploading"): return {"status": "already", "message": "既にバックアップ中/待機中です"}
+        if _OPS_PENDING > 0: return {"status": "error", "message": "クラウド操作 (リネーム同期/削除) が処理中です。完了後に再実行してください"} # moveto と sync の同一リモートへの同時実行を防ぐ
+        for k, o in _TASKS.items(): # 祖先フォルダが待機中/実行中 → その同期に既に含まれるため投入不要
+            if o["state"] in ("queued", "uploading") and tgt.startswith(os.path.normpath(o.get("full_path", "")) + os.sep):
+                return {"status": "covered", "message": f"親フォルダの同期に含まれています: {k}"}
+    if is_dir: cancel_under(full_path, message="親フォルダの同期に統合されました", descendants_only=True) # 配下の個別タスクは親に吸収 (同一リモートへの重複書き込み防止)
+    with _LOCK:
         _TASKS[key] = {"state": "queued", "message": "", "full_path": full_path, "is_dir": is_dir, "proc": None, "ts": time.time()}
     _QUEUE.put((key, full_path, is_dir, base_dirs, dict(cfg)))
     return {"status": "queued"}
@@ -85,8 +92,14 @@ def _process(key, full_path, is_dir, base_dirs, cfg): # 1 タスクの実行
     remote, reason = rsync.local_to_remote(full_path, base_dirs, cfg)
     if remote is None:
         _set(key, "error", reason or "リモートパスを解決できません"); return
-    args = ["copy" if is_dir else "copyto", full_path, remote]
-    if is_dir: args.append("--create-empty-src-dirs")
+    if is_dir:
+        if not os.listdir(full_path): _set(key, "error", "ローカルフォルダが空のため同期を中止しました (クラウド側を空にしないための保護)"); return # 安全弁1: 空フォルダでの sync を拒否
+        verb = cfg.get("dir_upload_mode", "sync") # sync = ミラー (多則削・少則加・異則上書き、対象子ツリー内のみ) / copy = 追加・上書きのみ
+        if verb not in ("sync", "copy"): verb = "sync"
+        args = [verb, rsync.local_arg(full_path), remote, "--create-empty-src-dirs"]
+        if verb == "sync" and cfg.get("sync_max_delete") is not None: args += ["--max-delete", str(cfg["sync_max_delete"])] # 安全弁2: 削除数の上限 (超過で rclone がエラー終了 → 赤ランプ)
+    else:
+        args = ["copyto", rsync.local_arg(full_path), remote]
     args += ["-v", "--stats", "5s", "--stats-one-line"] # 進捗の可視化: ファイル毎の完了ログ + 5秒毎の一行統計 (転送量/％/速度/ETA)
     if cfg.get("bwlimit"): args += ["--bwlimit", str(cfg["bwlimit"])] # 閲覧への帯域影響を抑えたい場合に config で指定 (例 "8M")
     if cfg.get("transfers"): args += ["--transfers", str(cfg["transfers"])]
@@ -115,6 +128,7 @@ def _process(key, full_path, is_dir, base_dirs, cfg): # 1 タスクの実行
             line = line.strip()
             if not line: continue
             tail.append(line)
+            if any(w in line for w in ("Attempt ", "retry", "ERROR", "NOTICE")): print(f"[backup] ⚠ [{key}] {line}") # 重試・エラーを可視化 (進捗行の条件では拾えない)
             # if ": Copied (" in line or ": Updated (" in line: # ファイル単位の完了報告 例: "INFO  : 作品A/001.jpg: Copied (new)"
             #     print(f"[backup] ✓ {line.split(':', 1)[-1].strip()}")
             if ("%" in line and "/" in line) or "ETA" in line: # --stats-one-line の統計行 例: "1.2 GiB / 4.5 GiB, 27%, 8.4 MiB/s, ETA 6m2s"
@@ -138,16 +152,16 @@ def _process(key, full_path, is_dir, base_dirs, cfg): # 1 タスクの実行
         print(f"[backup] 完了: {key} → {remote}")
     else:
         _set(key, "error", " / ".join(list(tail)[-3:])[-300:] or f"rclone 終了コード {proc.returncode}")
-
-def cancel_under(full_path, wait_seconds=10): # 対象パスに関係する実行中/待機中タスクを中止 (削除・リネームの直前に呼ぶ)
+def cancel_under(full_path, wait_seconds=10, message="削除/リネーム操作により中止されました", descendants_only=False): # descendants_only=True: 配下のタスクのみ中止 (親フォルダ同期への統合用)
     tgt = os.path.normpath(full_path)
-    victims = []
+    victims, canceled = [], [] # canceled: 中止したタスクのキー (待機中も含む)
     with _LOCK:
         for key, t in _TASKS.items():
             if t["state"] not in ("queued", "uploading"): continue
             p = os.path.normpath(t.get("full_path", ""))
-            if p == tgt or p.startswith(tgt + os.sep) or tgt.startswith(p + os.sep): # 祖先・子孫どちらの関係でも中止
-                t["state"], t["message"], t["ts"] = "canceled", "削除/リネーム操作により中止されました", time.time()
+            if p == tgt or p.startswith(tgt + os.sep) or (not descendants_only and tgt.startswith(p + os.sep)): # 祖先・子孫どちらの関係でも中止 (descendants_only 時は子孫のみ)
+                t["state"], t["message"], t["ts"] = "canceled", message, time.time()
+                canceled.append(key)
                 if t.get("proc"): victims.append((key, t["proc"]))
     for key, proc in victims: # ロック外でプロセス終了を待つ (削除処理がファイルハンドルと衝突しないように)
         try:
@@ -157,7 +171,7 @@ def cancel_under(full_path, wait_seconds=10): # 対象パスに関係する実�
             try: proc.kill(); proc.wait(timeout=5)
             except Exception: pass
         print(f"[backup] 削除/リネームに伴い中止: {key}")
-    return len(victims) > 0 or any(True for _ in victims)
+    return canceled # 中止したタスクのキー一覧。空リスト = 何も中止していない
 
 def drop_status(mode, media_path): # 削除された作品 (とその配下) の完了記録を破棄
     prefix = f"{mode.upper()}:{media_path}"
@@ -165,6 +179,15 @@ def drop_status(mode, media_path): # 削除された作品 (とその配下) の
         removed = [k for k in _DONE if k == prefix or k.startswith(prefix + "/")]
         for k in removed: del _DONE[k]
         if removed: _persist()
+
+def invalidate_ancestors(mode, media_path): # 配下の削除により祖先フォルダのクラウド内容がローカルと不一致 → 祖先の完了記録を破棄 (灰に戻して再同期を促す)
+    parts = media_path.split("/")
+    anc = {f"{mode.upper()}:{'/'.join(parts[:i])}" for i in range(1, len(parts))}
+    with _LOCK:
+        removed = [k for k in anc if k in _DONE]
+        for k in removed: del _DONE[k]
+        if removed: _persist()
+    return removed
 
 def migrate_status(mode, old_rel, new_rel): # リネーム成功 (クラウド moveto 済) 時に完了記録のキーを移行
     old_prefix, new_prefix = f"{mode.upper()}:{old_rel}", f"{mode.upper()}:{new_rel}"

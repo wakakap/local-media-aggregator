@@ -24,6 +24,13 @@ import os, sys, json, subprocess, traceback
 #     error         : rclone 実行失敗 (次回のバックアップ/差分チェックで整合させる)
 # ==========================================
 
+_WIN_FULLWIDTH = str.maketrans({"？": "?", "＊": "*", "＜": "<", "＞": ">", "｜": "|", "＂": '"', "：": ":"}) # rclone の Windows ローカル backend は ASCII の予約文字 ↔ 全角を相互変換し、全角そのものは引用符 ‛ 付きに変換する → ディスク上の全角名をそのまま渡すと存在しないパスになる
+
+def local_arg(path): # rclone のローカル側引数用: Windows ではディスク上の全角字を rclone の論理名 (ASCII) に戻して渡す
+    if sys.platform != 'win32': return path
+    drive, rest = os.path.splitdrive(path)
+    return drive + rest.translate(_WIN_FULLWIDTH)
+
 def _run_rclone(args, cfg, timeout=None): # rclone コマンドの実行ラッパー
     exe = cfg.get("rclone_exe", "rclone")
     env = os.environ.copy()

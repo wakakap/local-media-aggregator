@@ -159,6 +159,12 @@ def get_or_create_thumbnail(source_path, cover_root_path, thumbnail_base_name, s
         print(f"Thumbnail generation failed for {source_path}: {e}")
         return None
 
+def _close_pe(extractor): # icoextract 内部の pefile.PE を明示的に閉じ mmap を解放 (Windows では閉じるまで exe の削除/リネーム/同期ができない)
+    pe = getattr(extractor, '_pe', None) if extractor is not None else None
+    if pe is not None:
+        try: pe.close()
+        except Exception: pass
+
 def get_game_cover_thumbnail(full_path, cover_path, base_name, allow_subdir_fallback=True): # ゲーム用サムネイルの抽出
     if not os.path.isdir(full_path): return None
     thumbnail_dir = os.path.join(cover_path, "THUMBNAILS")
@@ -193,20 +199,22 @@ def get_game_cover_thumbnail(full_path, cover_path, base_name, allow_subdir_fall
         if os.path.getsize(target_exe) == 0: return None
         os.makedirs(thumbnail_dir, exist_ok=True)
         temp_ico = os.path.join(thumbnail_dir, f"{base_name}_temp.ico")
+        extractor = None
         try:
             extractor = IconExtractor(target_exe)
             extractor.export_icon(temp_ico)
         except Exception:
+            _close_pe(extractor); extractor = None
             if os.path.getsize(target_exe) > 100 * 1024 * 1024: return None
-            fd, safe_temp_exe = tempfile.mkstemp(suffix=".exe")
-            os.close(fd) 
-            try:
-                shutil.copy2(target_exe, safe_temp_exe)
-                extractor = IconExtractor(safe_temp_exe)
+            try: # 一時ファイルへのコピーは廃止: バイト列から直接解析するため %TEMP% にゴミが残らず、ファイルロックも発生しない
+                with open(target_exe, 'rb') as f: data = f.read()
+                extractor = IconExtractor(data=data)
                 extractor.export_icon(temp_ico)
-            except Exception: return None
-            finally:
-                if os.path.exists(safe_temp_exe): os.remove(safe_temp_exe)
+            except Exception:
+                if os.path.exists(temp_ico): os.remove(temp_ico) # 書きかけの一時 ico を残さない
+                return None
+        finally:
+            _close_pe(extractor) # 成功・失敗どちらでも元 exe の mmap を解放
         if os.path.exists(temp_ico):
             with Image.open(temp_ico) as img: img.save(thumbnail_path, "PNG")
             os.remove(temp_ico) 

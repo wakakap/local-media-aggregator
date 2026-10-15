@@ -141,3 +141,7 @@ body.tag-edit-mode .card-delete-btn, body.tag-edit-mode .row-delete-btn { displa
 .card-backup-btn { display: none; position: absolute; top: 4px; right: 26px; z-index: 3; width: 18px; height: 18px; line-height: 17px; text-align: center; font-size: 12px; color: #fff; background-color: rgba(25, 118, 210, 0.9); border-radius: 50%; cursor: pointer; user-select: none; } /* ×の左隣のバックアップボタン (編集モード時のみ表示) */
 .card-backup-btn:hover { background-color: #2196f3; transform: scale(1.15); }
 body.tag-edit-mode .card-backup-btn { display: block; }
+.row-backup-btn { display: none; margin-left: 10px; width: 18px; height: 18px; line-height: 17px; text-align: center; font-size: 12px; color: #fff; background-color: rgba(25, 118, 210, 0.9); border-radius: 50%; cursor: pointer; flex-shrink: 0; user-select: none; } /* リスト行の同期ボタン (×の左隣、編集モード時のみ表示) */
+.row-backup-btn:hover { background-color: #2196f3; }
+body.tag-edit-mode .row-backup-btn { display: block; }
+.card-backup-dot.row-backup-dot { position: static; flex-shrink: 0; margin-right: 8px; } /* 行内ではランプを絶対配置せずフロー配置 */

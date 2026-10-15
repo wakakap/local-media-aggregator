@@ -36,7 +36,9 @@
     "exclude_list": ["*/THUMBNAILS/**"],
     "exclude_keywords": ["THUMBNAILS"],
     "rclone_exe": "rclone",
-    "timeout_seconds": 300
+    "timeout_seconds": 300,
+    "dir_upload_mode": "sync",
+    "sync_max_delete": 200
 },
 "use_recycle_bin": true
 }

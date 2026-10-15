@@ -167,6 +167,7 @@ function setupEventListeners() { // 全イベントリスナーの登録
                     setTimeout(() => {
                         alert("タグと名前の変更を保存しました！");
                         if (res.rename_failures && res.rename_failures.length) alert("⚠️ 以下のリネームは実行できませんでした:\n" + res.rename_failures.map(f => `${f.path} (${f.reason})`).join('\n'));
+                        if (res.interrupted && res.interrupted.length) alert("☁ 以下の同期はリネームのため中止されました。改名後の作品で再度 ☁ を実行してください:\n" + res.interrupted.map(k => k.slice(k.indexOf(':') + 1)).join('\n'));
                     }, 50);
                 } else {
                     ui.showLoading(false);

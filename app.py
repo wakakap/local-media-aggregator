@@ -200,6 +200,7 @@ def api_batch_edit(): # 一括編集（タグ保存とリネームのトラン�
         with TAGS_LOCK:
             # 1. 物理ファイルの一括リネーム処理
             executed_renames, rename_failures = [], [] # rclone 同期用に成功分を記録
+            interrupted = [] # リネームにより中止された同期タスクのキー
             for old_path, new_name in renames.items():
                 if not os.path.exists(old_path):
                     rename_failures.append({"path": old_path, "reason": "not_found"}); continue
@@ -208,7 +209,7 @@ def api_batch_edit(): # 一括編集（タグ保存とリネームのトラン�
                 if not is_same_file_case_change and os.path.exists(new_path):
                     rename_failures.append({"path": old_path, "reason": "target_exists"}); continue
                 try:
-                    backup_manager.cancel_under(old_path) # 【競合対策】バックアップ中の作品をリネームする場合、先に rclone を止めてハンドル競合を防ぐ
+                    interrupted += backup_manager.cancel_under(old_path, message="リネームにより中止されました") # 【競合対策】バックアップ中の作品をリネームする場合、先に rclone を止めてハンドル競合を防ぐ
                     os.rename(old_path, new_path)
                     executed_renames.append((old_path, new_path))
                 except Exception as e:
@@ -235,7 +236,7 @@ def api_batch_edit(): # 一括編集（タグ保存とリネームのトラン�
             old_rel = os.path.relpath(old_p, root_paths[idx]).replace('\\', '/')
             new_rel = os.path.relpath(new_p, root_paths[idx]).replace('\\', '/')
             backup_manager.enqueue_rename(mode, old_p, new_p, old_rel, new_rel, BASE_DIRS, RCLONE_CONFIG)
-        return jsonify({"status": "success", "rename_failures": rename_failures, "ops_baseline": ops_baseline})
+        return jsonify({"status": "success", "rename_failures": rename_failures, "ops_baseline": ops_baseline, "interrupted": interrupted})
     
     except Exception as e:
         import traceback
@@ -269,7 +270,7 @@ def api_delete_item(): # アイテムの物理削除 (ローカル削除 + タ�
     if active_idx == -1 or not os.path.exists(full_path): return jsonify({"status": "error", "message": "Path not found"}), 404
     is_dir = os.path.isdir(full_path) # 削除前に種別を確定 (削除後は判定不能になるため)
     media_rel = os.path.relpath(full_path, root_paths[active_idx]).replace('\\', '/') # ステータスキー用の相対パスも削除前に確定
-    backup_canceled = backup_manager.cancel_under(full_path) # 【競合対策】この作品のバックアップが実行中/待機中なら中止し、rclone プロセスの終了を待ってからローカル削除へ進む
+    backup_canceled = bool(backup_manager.cancel_under(full_path))
     global all_tags
     with TAGS_LOCK:
         res = logic.delete_file_only(full_path, USE_RECYCLE_BIN)
@@ -277,7 +278,8 @@ def api_delete_item(): # アイテムの物理削除 (ローカル削除 + タ�
         cache_res = logic.remove_item_from_cache(mode, full_path, DATA_DIR) # キャッシュから即時除去(タグは残す)
         if cache_res['status'] == 'error': print(f"Cache patch error ({mode}): {cache_res['message']}")
     backup_manager.drop_status(mode, media_rel) # 完了記録も破棄 (残っているとゾンビの緑ランプになる)
-    return jsonify({"status": "success", "backup_canceled": backup_canceled}) # クラウド側は削除しない (管理 → クラウド差分 で確認の上整理)
+    stale = backup_manager.invalidate_ancestors(mode, media_rel) # 作品内の子項目削除 → 祖先の緑ランプは実態と不一致になるため灰に戻す
+    return jsonify({"status": "success", "backup_canceled": backup_canceled, "ancestors_invalidated": stale})
 
 @app.route('/api/open_folder')
 def api_open_folder(): # ローカルフォルダを開く
@@ -370,4 +372,4 @@ def api_dokidoki_file(filepath): # ドキドキモード専用のファイルス
         if os.path.exists(target): return send_from_directory(os.path.dirname(target), os.path.basename(target))
     abort(404)
 
-if __name__ == '__main__': app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+if __name__ == '__main__': app.run(host='0.0.0.0', port=5050, debug=False, use_reloader=False)

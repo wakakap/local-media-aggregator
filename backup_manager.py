@@ -18,6 +18,34 @@ import rclone_sync as rsync
 #    呼び出し側 (app.py) はローカル削除/リネームの「前」にこれを呼ぶこと。
 #   タスク state 一覧: queued / uploading / done / error / canceled
 # ==========================================
+# Windows: サーバー終了時に rclone 子プロセスを道連れにする (Job Object, KILL_ON_JOB_CLOSE)
+_JOB = None
+if sys.platform == 'win32':
+    try:
+        import ctypes
+        from ctypes import wintypes
+        _k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        class _BASIC(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64), ("LimitFlags", wintypes.DWORD),
+                        ("MinimumWorkingSetSize", ctypes.c_size_t), ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD), ("SchedulingClass", wintypes.DWORD)]
+        class _IOC(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_uint64) for n in ("ReadOperationCount", "WriteOperationCount", "OtherOperationCount", "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+        class _EXT(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", _BASIC), ("IoInfo", _IOC), ("ProcessMemoryLimit", ctypes.c_size_t),
+                        ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+        _k32.CreateJobObjectW.restype = wintypes.HANDLE
+        _k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        _JOB = _k32.CreateJobObjectW(None, None)
+        _info = _EXT(); _info.BasicLimitInformation.LimitFlags = 0x2000 # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not _JOB or not _k32.SetInformationJobObject(_JOB, 9, ctypes.byref(_info), ctypes.sizeof(_info)): _JOB = None # 9 = JobObjectExtendedLimitInformation
+    except Exception as e:
+        print(f"[backup] Job Object 初期化失敗 (子プロセス連動終了なしで継続): {e}"); _JOB = None
+
+def _bind_to_job(proc): # Popen 直後に呼ぶ
+    if _JOB:
+        try: _k32.AssignProcessToJobObject(_JOB, int(proc._handle))
+        except Exception as e: print(f"[backup] Job Object 割当失敗: {e}")
 
 _LOCK = threading.Lock()          # _TASKS と _DONE の保護
 _TASKS = {}                       # key -> {state, message, full_path, proc, ts}
@@ -26,6 +54,9 @@ _WORKERS = []                     # 起動済みワーカースレッド
 _DONE = {}                        # key -> {"time": "..."} 完了済みバックアップ (永続化対象)
 _STATUS_PATH = None               # backup_status.json のパス
 _FINISHED_TTL = 900               # 終了済みタスクを /api/status に載せ続ける秒数
+_LINK_SUFFIX = ".rclonelink"
+def _logical_name(name, is_dir): # --links で保存されたリンクはローカル側の名前に戻して比較する
+    return name[:-len(_LINK_SUFFIX)] if (not is_dir and name.endswith(_LINK_SUFFIX)) else name
 
 def init(data_dir): # 起動時に永続化済みステータスをロード
     global _STATUS_PATH, _DONE
@@ -100,6 +131,7 @@ def _process(key, full_path, is_dir, base_dirs, cfg): # 1 タスクの実行
         if verb == "sync" and cfg.get("sync_max_delete") is not None: args += ["--max-delete", str(cfg["sync_max_delete"])] # 安全弁2: 削除数の上限 (超過で rclone がエラー終了 → 赤ランプ)
     else:
         args = ["copyto", rsync.local_arg(full_path), remote]
+    args += ["--links"] # シンボリックリンクはリンク自体を .rclonelink として保存 (リンク先の実体はアップロードしない)
     args += ["-v", "--stats", "5s", "--stats-one-line"] # 進捗の可視化: ファイル毎の完了ログ + 5秒毎の一行統計 (転送量/％/速度/ETA)
     if cfg.get("bwlimit"): args += ["--bwlimit", str(cfg["bwlimit"])] # 閲覧への帯域影響を抑えたい場合に config で指定 (例 "8M")
     if cfg.get("transfers"): args += ["--transfers", str(cfg["transfers"])]
@@ -114,6 +146,7 @@ def _process(key, full_path, is_dir, base_dirs, cfg): # 1 タスクの実行
     try: proc = subprocess.Popen([exe] + args, **kwargs)
     except FileNotFoundError:
         _set(key, "error", "rclone コマンドが見つかりません (Path を確認してください)"); return
+    _bind_to_job(proc)
     with _LOCK: # Popen 直後の再確認: 直前に cancel された場合は即座に殺す
         t = _TASKS.get(key)
         if not t or t["state"] == "canceled":
@@ -306,7 +339,7 @@ def compute_cloud_diff(modes_config, base_dirs, cfg): # クラウドにのみ存
         for e in entries:
             name = e.get("Name", "")
             if not name or "/" in name or name in (".", "..") or name in excludes: continue # 不正名・除外対象は候補に載せない
-            nfc = unicodedata.normalize("NFC", name)
+            nfc = unicodedata.normalize("NFC", _logical_name(name, bool(e.get("IsDir"))))
             if nfc in local_exact: continue
             extras.append({"name": name, "is_dir": bool(e.get("IsDir")), "size": e.get("Size", -1),
                            "mtime": (e.get("ModTime") or "")[:16].replace("T", " "), "case_only": nfc.casefold() in local_folded})
@@ -338,7 +371,7 @@ def _op_purge(op):
     missing = [b for b in op["base_dirs"] if not os.path.isdir(b)]
     if missing: return "error", "ドライブ未接続のため中止しました: " + ", ".join(missing)
     local_exact, _ = _local_top_names(op["base_dirs"], op["pages"]) # 実行直前に再確認 (差分表示後に同名作品を戻した場合を保護)
-    if unicodedata.normalize("NFC", op["name"]) in local_exact: return "skipped", "ローカルに同名項目が存在するため削除しませんでした"
+    if unicodedata.normalize("NFC", _logical_name(op["name"], op["is_dir"])) in local_exact: return "skipped", "ローカルに同名項目が存在するため削除しませんでした"
     result = rsync._run_rclone(["purge" if op["is_dir"] else "deletefile", op["remote"]], op["cfg"],
                                timeout=op["cfg"].get("purge_timeout_seconds", 3600)) # 大容量フォルダの purge 用に長めのタイムアウト
     if result.returncode == 0:

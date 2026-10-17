@@ -226,19 +226,21 @@ def get_game_cover_thumbnail(full_path, cover_path, base_name, allow_subdir_fall
 
 def calc_folder_stats(folder_path): # フォルダ配下の総体積と最新更新日時を 1 回の走査で集計（最外層作品のみで使用）
     total, latest = 0, 0.0
-    future_limit = time.time() + 86400 # 未来日付の壊れたタイムスタンプ（解凍物等）で永久に最上位へ固定されるのを防ぐ
-    for root, _dirs, files in os.walk(folder_path):
+    future_limit = time.time() + 86400
+    _isjunc = getattr(os.path, "isjunction", lambda p: False) # Python 3.12+ のみ。ジャンクションも辿らない
+    for root, dirs, files in os.walk(folder_path):
+        dirs[:] = [d for d in dirs if not (os.path.islink(os.path.join(root, d)) or _isjunc(os.path.join(root, d)))] # リンク先フォルダには降りない
         try:
-            m = os.path.getmtime(root) # フォルダ自体の mtime（直下の追加・削除・改名で更新）
+            m = os.path.getmtime(root)
             if latest < m <= future_limit: latest = m
         except OSError: pass
         for f in files:
             try:
-                st = os.stat(os.path.join(root, f)) # getsize と getmtime を 1 回の stat に統合
+                st = os.stat(os.path.join(root, f), follow_symlinks=False) # リンクはリンク自身の情報 (サイズ≒0) のみ。リンク先の体積は計上しない
                 total += st.st_size
                 if latest < st.st_mtime <= future_limit: latest = st.st_mtime
             except OSError:
-                pass # 壊れたシンボリックリンク / アクセス不可ファイルは無視して継続
+                pass
     return total, latest
 
 def _create_item_data(full_path, root_path, cover_path, all_tags, cover_map, mode, allow_thumbnail_gen=True): # アイテムデータの生成
